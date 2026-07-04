@@ -7,8 +7,9 @@
   "scripts": {
     "ticker": "node src/rest/ticker.js",
     "ticker:ws": "node src/ws/ticker.js",
-    "check": "node --check src/rest/ticker.js && node --check src/ws/ticker.js",
-    "test": "npm run check"
+    "triangles": "node scripts/scan-triangles.js",
+    "check": "node --check src/rest/ticker.js && node --check src/ws/ticker.js && node --check src/lib/marketGraph.js && node --check src/lib/triangles.js && node --check src/lib/multiplier.js && node --check src/lib/upbitApi.js && node --check src/lib/report.js && node --check scripts/scan-triangles.js",
+    "test": "npm run check && node --test"
   },
   "engines": {
     "node": ">=22 <23"
