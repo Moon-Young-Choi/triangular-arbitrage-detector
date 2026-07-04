@@ -88,6 +88,10 @@ h2 {
   margin-bottom: 14px;
 }
 
+.performance-grid {
+  grid-template-columns: repeat(8, minmax(128px, 1fr));
+}
+
 .metric-card {
   min-width: 0;
   border: 1px solid var(--line);
@@ -201,6 +205,11 @@ h2 {
   border-radius: 50%;
 }
 
+.legend-dot.diamond {
+  border-radius: 2px;
+  transform: rotate(45deg);
+}
+
 .legend-dot.green {
   background: var(--green);
 }
@@ -245,6 +254,17 @@ h2 {
   font-size: 13px;
 }
 
+.detail-section {
+  display: grid;
+  gap: 8px;
+}
+
+.detail-title {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 700;
+}
+
 .detail-row {
   display: grid;
   grid-template-columns: 126px minmax(0, 1fr);
@@ -258,6 +278,68 @@ h2 {
 .detail-row span {
   overflow-wrap: anywhere;
   color: var(--text);
+}
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  background: #fff;
+}
+
+th,
+td {
+  border-bottom: 1px solid #edf0f4;
+  padding: 6px 7px;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+th {
+  color: #4b5563;
+  font-size: 11px;
+  text-transform: uppercase;
+  background: #f8fafc;
+}
+
+td {
+  color: var(--text);
+  font-size: 12px;
+}
+
+tr:last-child td {
+  border-bottom: 0;
+}
+
+.used-price {
+  font-weight: 700;
+  color: var(--green);
+}
+
+.hover-tooltip {
+  position: fixed;
+  z-index: 20;
+  display: none;
+  max-width: min(860px, calc(100vw - 24px));
+  max-height: min(540px, calc(100vh - 24px));
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  background: #fff;
+  box-shadow: 0 14px 36px rgba(19, 28, 43, 0.18);
+  pointer-events: none;
+}
+
+.hover-tooltip.show {
+  display: block;
 }
 
 .toast {

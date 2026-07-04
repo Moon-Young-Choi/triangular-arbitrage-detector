@@ -4,7 +4,7 @@ const path = require("node:path");
 const { buildGraph, mapToSortedObject } = require("../src/lib/marketGraph");
 const {
   findUniqueTriangles,
-  buildCanonicalCycles,
+  buildDirectionalCycles,
   getHubBreakdownCounts,
 } = require("../src/lib/triangles");
 const { calculateCycleMultiplier } = require("../src/lib/multiplier");
@@ -86,7 +86,7 @@ function printRankedCycles(title, rows) {
   rows.forEach((row, index) => {
     console.log(
       `  ${String(index + 1).padStart(2, " ")}. ${formatMultiplier(row.netMultiplier)} ` +
-        `${row.routeLabel} [${row.markets.join(", ")}]`,
+        `${row.directionLabel || row.direction} ${row.routeLabel} [${row.markets.join(", ")}]`,
     );
   });
 }
@@ -103,10 +103,12 @@ function buildMultiplierRows(cycles, orderbookMap, feeInfo) {
     return {
       index: index + 1,
       id: cycle.id,
+      triangleId: cycle.triangleId,
+      cycleId: cycle.cycleId,
+      direction: cycle.direction,
+      directionLabel: cycle.directionLabel,
       route: cycle.route,
       routeLabel: cycle.routeLabel,
-      reverseRoute: cycle.reverseRoute,
-      reverseRouteLabel: cycle.reverseRouteLabel,
       markets: cycle.markets,
       steps: cycle.steps,
       available,
@@ -116,7 +118,6 @@ function buildMultiplierRows(cycles, orderbookMap, feeInfo) {
       grossMultiplier: grossResult.available ? grossResult.multiplier : null,
       netMultiplier,
       profitRate: available ? netMultiplier - 1 : null,
-      impliedReverseMultiplier: available ? 1 / netMultiplier : null,
       feeRate: feeInfo.feeRate,
       feeRateConfigured: feeInfo.configured,
     };
@@ -147,9 +148,9 @@ async function main() {
 
   console.log("Finding unique triangular routes...");
   const triangles = findUniqueTriangles(graph, pairMap);
-  const canonicalCycles = buildCanonicalCycles(triangles, pairMap);
+  const plottedCycles = buildDirectionalCycles(triangles, pairMap);
   const hubBreakdown = getHubBreakdownCounts(triangles);
-  const requiredMarkets = [...new Set(canonicalCycles.flatMap((cycle) => cycle.markets))].sort();
+  const requiredMarkets = [...new Set(plottedCycles.flatMap((cycle) => cycle.markets))].sort();
 
   console.log(
     `Fetching orderbooks for ${requiredMarkets.length} markets ` +
@@ -160,7 +161,7 @@ async function main() {
     delayMs: orderbookDelayMs,
   });
 
-  const multiplierRows = buildMultiplierRows(canonicalCycles, orderbookResult.orderbookMap, feeInfo);
+  const multiplierRows = buildMultiplierRows(plottedCycles, orderbookResult.orderbookMap, feeInfo);
   const unavailableCount = multiplierRows.filter((row) => !row.available).length;
   const topRows = sortAvailableRows(multiplierRows, "desc").slice(0, 20);
   const bottomRows = sortAvailableRows(multiplierRows, "asc").slice(0, 20);
@@ -170,7 +171,9 @@ async function main() {
     totalMarketsLoaded: normalizedMarkets.length,
     quoteCounts: mapToSortedObject(quoteCounts),
     uniqueTriangleCount: triangles.length,
-    canonicalCycleCount: canonicalCycles.length,
+    plottedCycleCount: plottedCycles.length,
+    canonicalCycleCount: plottedCycles.filter((cycle) => cycle.direction === "canonical").length,
+    reverseCycleCount: plottedCycles.filter((cycle) => cycle.direction === "reverse").length,
     hubBreakdown,
     requestedOrderbookMarketCount: orderbookResult.requestedMarketCount,
     fetchedOrderbookMarketCount: orderbookResult.fetchedMarketCount,
@@ -200,15 +203,15 @@ async function main() {
   console.log(`Total Upbit markets loaded: ${normalizedMarkets.length}`);
   printQuoteCounts(quoteCounts);
   console.log(`uniqueTriangleCount: ${triangles.length}`);
-  console.log(`canonicalCycleCount: ${canonicalCycles.length}`);
+  console.log(`plottedCycleCount: ${plottedCycles.length}`);
   printHubBreakdown(hubBreakdown);
   console.log(`Net fee rate: ${feeInfo.label}`);
   console.log(`Orderbooks fetched: ${orderbookResult.fetchedMarketCount}/${orderbookResult.requestedMarketCount}`);
   console.log(`Unavailable cycle multipliers: ${unavailableCount}`);
   console.log("");
-  printRankedCycles("Top 20 canonical cycles by netMultiplier:", topRows);
+  printRankedCycles("Top 20 plotted cycles by netMultiplier:", topRows);
   console.log("");
-  printRankedCycles("Bottom 20 canonical cycles by netMultiplier:", bottomRows);
+  printRankedCycles("Bottom 20 plotted cycles by netMultiplier:", bottomRows);
   console.log("");
   console.log("Wrote outputs:");
   console.log(`  ${path.relative(process.cwd(), reportPaths.trianglesPath)}`);

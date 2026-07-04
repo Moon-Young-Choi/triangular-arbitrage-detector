@@ -1,5 +1,6 @@
 const EventEmitter = require("node:events");
 const crypto = require("node:crypto");
+const { performance } = require("node:perf_hooks");
 const WebSocket = require("ws");
 
 const DEFAULT_ENDPOINT = "wss://api.upbit.com/websocket/v1";
@@ -14,7 +15,7 @@ function chunk(items, size) {
   return chunks;
 }
 
-function normalizeOrderbookMessage(payload, receivedAt = Date.now()) {
+function normalizeOrderbookMessage(payload, receivedAt = Date.now(), timings = {}) {
   const unit = payload && Array.isArray(payload.orderbook_units) && payload.orderbook_units[0];
 
   if (!payload || payload.type !== "orderbook" || !unit) {
@@ -30,6 +31,10 @@ function normalizeOrderbookMessage(payload, receivedAt = Date.now()) {
     timestamp: Number(payload.timestamp),
     streamType: payload.stream_type || payload.streamType || "UNKNOWN",
     receivedAt,
+    timings: {
+      ...timings,
+      upbitTimestampMs: Number(payload.timestamp || payload.tms),
+    },
   };
 }
 
@@ -122,11 +127,18 @@ class UpbitWsOrderbookClient extends EventEmitter {
     });
 
     ws.on("message", (data) => {
-      connection.lastMessageAt = Date.now();
+      const serverReceiveEpochMs = Date.now();
+      const serverReceivePerfMs = performance.now();
+      connection.lastMessageAt = serverReceiveEpochMs;
 
       try {
         const payload = JSON.parse(data.toString("utf8"));
-        const orderbook = normalizeOrderbookMessage(payload, connection.lastMessageAt);
+        const parseDonePerfMs = performance.now();
+        const orderbook = normalizeOrderbookMessage(payload, connection.lastMessageAt, {
+          serverReceiveEpochMs,
+          serverReceivePerfMs,
+          parseDonePerfMs,
+        });
 
         if (orderbook && orderbook.market) {
           this.emit("orderbook", orderbook);

@@ -26,13 +26,15 @@ function csvEscape(value) {
 function buildMultiplierCsv(rows) {
   const headers = [
     "index",
+    "triangleId",
+    "cycleId",
+    "direction",
     "route",
     "markets",
     "available",
     "grossMultiplier",
     "netMultiplier",
     "profitRate",
-    "impliedReverseMultiplier",
     "unavailableReason",
   ];
 
@@ -42,13 +44,15 @@ function buildMultiplierCsv(rows) {
     lines.push(
       [
         index + 1,
+        row.triangleId || "",
+        row.cycleId || row.id || "",
+        row.direction || "",
         row.routeLabel,
         row.markets.join(" | "),
         row.available,
         formatNumber(row.grossMultiplier),
         formatNumber(row.netMultiplier),
         formatNumber(row.profitRate),
-        formatNumber(row.impliedReverseMultiplier),
         row.unavailableReason || "",
       ].map(csvEscape).join(","),
     );
@@ -66,7 +70,7 @@ function buildHtmlReport(rows, metadata) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Upbit Canonical Cycle Multipliers</title>
+  <title>Upbit Triangle Cycle Multipliers</title>
   <style>
     body {
       margin: 0;
@@ -154,12 +158,12 @@ function buildHtmlReport(rows, metadata) {
 </head>
 <body>
   <main>
-    <h1>Upbit Canonical Cycle Multipliers</h1>
+    <h1>Upbit Triangle Cycle Multipliers</h1>
     <div id="summary" class="summary"></div>
     <div class="chart-wrap">
       <svg id="chart" width="1400" height="720" role="img" aria-label="Multiplier scatter plot"></svg>
     </div>
-    <p class="note">Each point is one canonical cycle. Reverse cycles are not plotted by default. The red dashed line is multiplier = 1.</p>
+    <p class="note">Each point is one actual directional cycle. The red dashed line is multiplier = 1.</p>
   </main>
   <script>
     const rows = ${dataJson};
@@ -170,7 +174,7 @@ function buildHtmlReport(rows, metadata) {
     const metrics = [
       ["Markets", metadata.totalMarketsLoaded],
       ["Unique triangles", metadata.uniqueTriangleCount],
-      ["Canonical cycles", metadata.canonicalCycleCount],
+      ["Plotted cycles", metadata.plottedCycleCount || metadata.canonicalCycleCount],
       ["Available multipliers", rows.filter((row) => row.available).length],
       ["Net fee rate", metadata.netFeeRateLabel],
     ];
@@ -213,7 +217,7 @@ function buildHtmlReport(rows, metadata) {
     const refY = yScale(1);
     chart.appendChild(el("line", { class: "ref", x1: margin.left, y1: refY, x2: width - margin.right, y2: refY }));
     chart.appendChild(el("text", { x: width - margin.right, y: refY - 8, "text-anchor": "end" }, "y = 1"));
-    chart.appendChild(el("text", { x: margin.left + innerWidth / 2, y: height - 16, "text-anchor": "middle" }, "Canonical cycle index"));
+    chart.appendChild(el("text", { x: margin.left + innerWidth / 2, y: height - 16, "text-anchor": "middle" }, "Plotted cycle index"));
     chart.appendChild(el("text", { x: 18, y: margin.top + innerHeight / 2, transform: "rotate(-90 18 " + (margin.top + innerHeight / 2) + ")", "text-anchor": "middle" }, "Multiplier"));
 
     rows.forEach((row, index) => {
@@ -226,11 +230,11 @@ function buildHtmlReport(rows, metadata) {
       });
       const title = [
         row.routeLabel,
+        "direction: " + (row.directionLabel || row.direction || ""),
         "markets: " + row.markets.join(", "),
         "grossMultiplier: " + row.grossMultiplier,
         "netMultiplier: " + row.netMultiplier,
         "profitRate: " + row.profitRate,
-        "impliedReverseMultiplier: " + row.impliedReverseMultiplier,
         row.unavailableReason ? "unavailable: " + row.unavailableReason : "",
       ].filter(Boolean).join("\\n");
       point.appendChild(el("title", {}, title));

@@ -94,8 +94,7 @@ function marketForRouteStep(fromAsset, toAsset, triangle, pairMap) {
   return marketCode;
 }
 
-function buildCanonicalCycle(triangle, pairMap) {
-  const route = canonicalRouteForTriangle(triangle);
+function routeSteps(route, triangle, pairMap) {
   const steps = [];
 
   for (let index = 0; index < route.length - 1; index += 1) {
@@ -110,24 +109,64 @@ function buildCanonicalCycle(triangle, pairMap) {
     });
   }
 
-  const reverseRoute = [route[0], route[2], route[1], route[0]];
-  // The reverse direction is not plotted by default. With zero spread and zero fees it is approximately the reciprocal of the canonical multiplier, but with real bid/ask orderbooks and fees it must be recalculated before execution.
+  return steps;
+}
+
+function buildCycleForRoute(triangle, route, direction, pairMap) {
+  const steps = routeSteps(route, triangle, pairMap);
+  const directionLabel = direction === "canonical" ? "정방향" : "역방향";
+
+  // Reverse profitability must be calculated from the actual reverse route using live bid/ask orderbooks. It must not be inferred from 1 / canonicalMultiplier because bid/ask spread and fees break the reciprocal relationship.
   return {
-    id: triangle.id,
+    id: `${triangle.id}:${direction}`,
+    triangleId: triangle.id,
+    cycleId: `${triangle.id}:${direction}`,
+    direction,
+    directionLabel,
     triangleAssets: triangle.assets,
+    assets: triangle.assets,
     route,
     routeLabel: route.join(" -> "),
-    reverseRoute,
-    reverseRouteLabel: reverseRoute.join(" -> "),
     markets: steps.map((step) => step.market),
     steps,
   };
+}
+
+function buildCanonicalCycle(triangle, pairMap) {
+  const route = canonicalRouteForTriangle(triangle);
+
+  return buildCycleForRoute(triangle, route, "canonical", pairMap);
+}
+
+function reverseRouteForCanonicalRoute(route) {
+  const reverseRoute = [route[0], route[2], route[1], route[0]];
+
+  return reverseRoute;
+}
+
+function buildDirectionalCyclesForTriangle(triangle, pairMap) {
+  const canonicalRoute = canonicalRouteForTriangle(triangle);
+  const reverseRoute = reverseRouteForCanonicalRoute(canonicalRoute);
+
+  return [
+    buildCycleForRoute(triangle, canonicalRoute, "canonical", pairMap),
+    buildCycleForRoute(triangle, reverseRoute, "reverse", pairMap),
+  ];
 }
 
 function buildCanonicalCycles(triangles, pairMap) {
   return triangles
     .map((triangle) => buildCanonicalCycle(triangle, pairMap))
     .sort((left, right) => left.routeLabel.localeCompare(right.routeLabel));
+}
+
+function buildDirectionalCycles(triangles, pairMap) {
+  return triangles
+    .flatMap((triangle) => buildDirectionalCyclesForTriangle(triangle, pairMap))
+    .sort((left, right) => (
+      left.triangleId.localeCompare(right.triangleId) ||
+      left.direction.localeCompare(right.direction)
+    ));
 }
 
 function getHubBreakdownCounts(triangles) {
@@ -160,6 +199,9 @@ module.exports = {
   findUniqueTriangles,
   buildCanonicalCycle,
   buildCanonicalCycles,
+  buildDirectionalCyclesForTriangle,
+  buildDirectionalCycles,
   getHubBreakdownCounts,
   canonicalRouteForTriangle,
+  reverseRouteForCanonicalRoute,
 };

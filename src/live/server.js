@@ -2,6 +2,7 @@ const http = require("node:http");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { URL } = require("node:url");
+const WebSocket = require("ws");
 const { LiveTriangleState, parseFeeRate } = require("./liveState");
 const { formatLocalTimestampForFilename } = require("./liveUtils");
 const { UpbitWsOrderbookClient } = require("../upbit/wsOrderbookClient");
@@ -92,7 +93,7 @@ async function saveCapture(capturesDir, payload) {
   const requestedDate = timestamp ? new Date(timestamp) : new Date();
   const captureDate = Number.isNaN(requestedDate.getTime()) ? new Date() : requestedDate;
   const stamp = formatLocalTimestampForFilename(captureDate);
-  const baseName = `upbit-canonical-cycles-${stamp}`;
+  const baseName = `upbit-triangle-live-${stamp}`;
   const pngPath = path.join(capturesDir, `${baseName}.png`);
   const jsonPath = path.join(capturesDir, `${baseName}.json`);
   const base64 = imageDataUrl.slice("data:image/png;base64,".length);
@@ -137,6 +138,28 @@ function createRequestHandler(options) {
       }
 
       if (req.method === "GET" && requestUrl.pathname === "/api/state") {
+        sendJson(res, 200, state.getSnapshot());
+        return;
+      }
+
+      if (req.method === "POST" && requestUrl.pathname === "/api/settings") {
+        const payload = await readJsonBody(req);
+
+        if (payload.feeRate !== undefined) {
+          state.setFeeRate(payload.feeRate);
+        }
+
+        if (payload.staleOrderbookMs !== undefined) {
+          const staleOrderbookMs = Number.parseInt(payload.staleOrderbookMs, 10);
+
+          if (!Number.isInteger(staleOrderbookMs) || staleOrderbookMs <= 0) {
+            throw new Error(`Invalid staleOrderbookMs: ${payload.staleOrderbookMs}`);
+          }
+
+          state.staleOrderbookMs = staleOrderbookMs;
+          state.recalculateAll({ markDirty: true });
+        }
+
         sendJson(res, 200, state.getSnapshot());
         return;
       }
@@ -201,13 +224,31 @@ function sendSse(clients, eventName, payload) {
   }
 }
 
+function sendWs(clients, payload) {
+  const message = JSON.stringify(payload);
+
+  for (const client of clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  }
+}
+
+function clampInterval(value, defaultValue) {
+  const parsed = Number.parseInt(value || "", 10);
+  const interval = Number.isInteger(parsed) ? parsed : defaultValue;
+
+  return Math.max(16, Math.min(1000, interval));
+}
+
 async function startLiveServer(options = {}) {
-  const port = options.port || Number.parseInt(process.env.PORT || "3099", 10);
+  const port = options.port !== undefined ? options.port : Number.parseInt(process.env.PORT || "3099", 10);
   const host = options.host || "127.0.0.1";
-  const uiPushIntervalMs = options.uiPushIntervalMs ||
-    Number.parseInt(process.env.UI_PUSH_INTERVAL_MS || "1000", 10);
+  const uiPushIntervalMs = clampInterval(options.uiPushIntervalMs || process.env.UI_PUSH_INTERVAL_MS, 50);
+  const ssePushIntervalMs = options.ssePushIntervalMs ||
+    Number.parseInt(process.env.SSE_PUSH_INTERVAL_MS || "1000", 10);
   const staleOrderbookMs = options.staleOrderbookMs ||
-    Number.parseInt(process.env.STALE_ORDERBOOK_MS || "5000", 10);
+    Number.parseInt(process.env.STALE_ORDERBOOK_MS || "3000", 10);
   const orderbookBatchSize = Number.parseInt(process.env.UPBIT_ORDERBOOK_BATCH_SIZE || "50", 10);
   const orderbookDelayMs = Number.parseInt(process.env.UPBIT_ORDERBOOK_DELAY_MS || "200", 10);
   const wsMarketsPerConnection = Number.parseInt(process.env.UPBIT_WS_MARKETS_PER_CONNECTION || "100", 10);
@@ -225,12 +266,56 @@ async function startLiveServer(options = {}) {
   }
 
   const sseClients = new Set();
+  const liveWsClients = new Set();
+  const liveWsServer = new WebSocket.Server({ noServer: true });
   const server = http.createServer(createRequestHandler({
     state,
     sseClients,
     publicDir: options.publicDir || path.resolve(process.cwd(), "public"),
     capturesDir: options.capturesDir || path.resolve(process.cwd(), "out", "captures"),
   }));
+
+  liveWsServer.on("connection", (socket) => {
+    liveWsClients.add(socket);
+    socket.send(JSON.stringify({
+      type: "hello",
+      sentAtEpochMs: Date.now(),
+      uiPushIntervalMs,
+    }));
+    socket.send(JSON.stringify(state.getSnapshot()));
+
+    socket.on("message", (data) => {
+      try {
+        const message = JSON.parse(data.toString("utf8"));
+
+        if (message.type === "client-metrics" && message.renderedFrames) {
+          state.metrics.increment("browserRenderedFrames", Number(message.renderedFrames) || 0);
+        }
+      } catch (_error) {
+        socket.send(JSON.stringify({
+          type: "error",
+          message: "Invalid client message",
+        }));
+      }
+    });
+
+    socket.on("close", () => {
+      liveWsClients.delete(socket);
+    });
+  });
+
+  server.on("upgrade", (req, socket, head) => {
+    const requestUrl = new URL(req.url, "http://localhost");
+
+    if (requestUrl.pathname !== "/ws/live" || !isLocalRequest(req)) {
+      socket.destroy();
+      return;
+    }
+
+    liveWsServer.handleUpgrade(req, socket, head, (ws) => {
+      liveWsServer.emit("connection", ws, req);
+    });
+  });
 
   const wsClient = options.wsClient || new UpbitWsOrderbookClient(state.requiredMarkets || [], {
     chunkSize: wsMarketsPerConnection,
@@ -242,32 +327,60 @@ async function startLiveServer(options = {}) {
   wsClient.on("status", (status) => {
     state.setWsStatus(status);
     sendSse(sseClients, "status", status);
+    sendWs(liveWsClients, {
+      type: "status",
+      sentAtEpochMs: Date.now(),
+      status,
+    });
   });
   wsClient.on("error", (error) => {
     sendSse(sseClients, "error", error);
+    sendWs(liveWsClients, {
+      type: "error",
+      sentAtEpochMs: Date.now(),
+      error,
+    });
   });
 
-  const stateTimer = setInterval(() => {
-    sendSse(sseClients, "state", state.getSnapshot());
-  }, uiPushIntervalMs);
+  let deltaTimer = null;
+  let sseTimer = null;
+  let fallbackTimer = null;
 
-  const fallbackTimer = setInterval(async () => {
-    if (!state.shouldUseFallback()) {
-      return;
-    }
+  const startTimers = () => {
+    deltaTimer = setInterval(() => {
+      if (liveWsClients.size === 0) {
+        return;
+      }
 
-    try {
-      await state.fallbackPoll({
-        batchSize: orderbookBatchSize,
-        delayMs: orderbookDelayMs,
-      });
-    } catch (error) {
-      sendSse(sseClients, "error", {
-        type: "fallback",
-        message: error.message,
-      });
-    }
-  }, Math.max(staleOrderbookMs, 5000));
+      const delta = state.consumeDelta();
+      delta.sentAtEpochMs = Date.now();
+      sendWs(liveWsClients, delta);
+    }, uiPushIntervalMs);
+
+    sseTimer = setInterval(() => {
+      if (sseClients.size > 0) {
+        sendSse(sseClients, "state", state.getSnapshot());
+      }
+    }, ssePushIntervalMs);
+
+    fallbackTimer = setInterval(async () => {
+      if (!state.shouldUseFallback()) {
+        return;
+      }
+
+      try {
+        await state.fallbackPoll({
+          batchSize: orderbookBatchSize,
+          delayMs: orderbookDelayMs,
+        });
+      } catch (error) {
+        sendSse(sseClients, "error", {
+          type: "fallback",
+          message: error.message,
+        });
+      }
+    }, Math.max(staleOrderbookMs, 5000));
+  };
 
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -280,6 +393,7 @@ async function startLiveServer(options = {}) {
   if (!options.skipFeeds) {
     wsClient.start();
   }
+  startTimers();
 
   return {
     server,
@@ -287,12 +401,17 @@ async function startLiveServer(options = {}) {
     wsClient,
     url: `http://${host}:${server.address().port}`,
     close: async () => {
-      clearInterval(stateTimer);
-      clearInterval(fallbackTimer);
+      if (deltaTimer) clearInterval(deltaTimer);
+      if (sseTimer) clearInterval(sseTimer);
+      if (fallbackTimer) clearInterval(fallbackTimer);
       wsClient.stop();
       for (const client of sseClients) {
         client.end();
       }
+      for (const client of liveWsClients) {
+        client.close(1000, "server shutdown");
+      }
+      liveWsServer.close();
       await new Promise((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });

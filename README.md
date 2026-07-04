@@ -43,7 +43,7 @@ Run the read-only universe scanner:
 npm run triangles
 ```
 
-The scanner loads all Upbit markets dynamically, finds unique 3-asset triangles, builds exactly one canonical display cycle per triangle, fetches orderbook best bid/ask snapshots, and writes:
+The scanner loads all Upbit markets dynamically, finds unique 3-asset triangles, builds canonical and reverse directional cycles for each triangle, fetches orderbook best bid/ask snapshots, and writes:
 
 - `out/upbit-triangles.json`
 - `out/upbit-canonical-cycles.json`
@@ -56,7 +56,7 @@ By default, `netMultiplier` equals `grossMultiplier` because no fee is assumed. 
 UPBIT_TAKER_FEE_RATE=0.0005 npm run triangles
 ```
 
-The scanner does not submit orders and does not plot reverse cycles.
+The scanner does not submit orders. Reverse rows are calculated from their own route and current bid/ask snapshots.
 
 ## Live Dashboard
 
@@ -78,4 +78,4 @@ Use `PORT` to choose another port:
 PORT=4100 npm run triangles:live
 ```
 
-The browser reads from the local Node.js server only. Upbit market discovery, orderbook WebSocket subscriptions, multiplier calculation, caching, and capture saving are handled server-side. Captures are saved under `out/captures/`.
+The browser reads from the local Node.js server only. Upbit market discovery, orderbook WebSocket subscriptions, multiplier calculation, caching, latency metrics, and capture saving are handled server-side. Captures are saved under `out/captures/`.

@@ -16,11 +16,13 @@
       </div>
       <div class="actions">
         <button id="pauseButton" type="button">Pause</button>
+        <button id="resyncButton" type="button">Resync</button>
         <button id="captureButton" type="button">Capture</button>
       </div>
     </header>
 
     <section id="summaryCards" class="summary-grid" aria-label="Summary"></section>
+    <section id="performanceCards" class="summary-grid performance-grid" aria-label="Performance and latency"></section>
 
     <section class="workspace">
       <div class="chart-panel">
@@ -32,7 +34,7 @@
           </label>
           <label>
             <span>Stale threshold ms</span>
-            <input id="staleInput" type="number" min="500" step="500" value="5000">
+            <input id="staleInput" type="number" min="250" step="250" value="3000">
           </label>
           <label class="check-row">
             <input id="autoScaleInput" type="checkbox" checked>
@@ -47,9 +49,9 @@
         <div id="groupFilters" class="group-filters" aria-label="Group filters"></div>
 
         <div class="legend">
-          <span><i class="legend-dot green"></i>Canonical profitable after fee</span>
-          <span><i class="legend-dot pink"></i>Implied reverse profitable after fee</span>
-          <span><i class="legend-dot neutral"></i>Inside no-fee-adjusted-profit band</span>
+          <span><i class="legend-dot green"></i>정방향 실제 수익 가능</span>
+          <span><i class="legend-dot pink diamond"></i>역방향 실제 수익 가능</span>
+          <span><i class="legend-dot neutral"></i>수수료 후 수익 아님</span>
           <span><i class="legend-dot gray"></i>Unavailable or stale</span>
         </div>
 
