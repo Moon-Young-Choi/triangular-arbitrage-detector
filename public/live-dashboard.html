@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>q-gagarin live triangles</title>
+  <link rel="stylesheet" href="/live-dashboard.css">
+  <script src="/vendor/plotly.min.js"></script>
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1>q-gagarin live triangles</h1>
+        <p id="connectionLine">Connecting...</p>
+      </div>
+      <div class="actions">
+        <button id="pauseButton" type="button">Pause</button>
+        <button id="captureButton" type="button">Capture</button>
+      </div>
+    </header>
+
+    <section id="summaryCards" class="summary-grid" aria-label="Summary"></section>
+
+    <section class="workspace">
+      <div class="chart-panel">
+        <div class="controls">
+          <label>
+            <span>Taker fee per leg</span>
+            <input id="feeInput" type="number" min="0" max="0.999999" step="0.0001" value="0">
+            <small>0.0005 = 0.05% per trade</small>
+          </label>
+          <label>
+            <span>Stale threshold ms</span>
+            <input id="staleInput" type="number" min="500" step="500" value="5000">
+          </label>
+          <label class="check-row">
+            <input id="autoScaleInput" type="checkbox" checked>
+            <span>Auto-scale y-axis</span>
+          </label>
+          <label class="check-row">
+            <input id="showUnavailableInput" type="checkbox">
+            <span>Show unavailable</span>
+          </label>
+        </div>
+
+        <div id="groupFilters" class="group-filters" aria-label="Group filters"></div>
+
+        <div class="legend">
+          <span><i class="legend-dot green"></i>Canonical profitable after fee</span>
+          <span><i class="legend-dot pink"></i>Implied reverse profitable after fee</span>
+          <span><i class="legend-dot neutral"></i>Inside no-fee-adjusted-profit band</span>
+          <span><i class="legend-dot gray"></i>Unavailable or stale</span>
+        </div>
+
+        <div id="chart" class="chart"></div>
+      </div>
+
+      <aside class="detail-panel">
+        <div class="detail-head">
+          <h2>Route detail</h2>
+          <button id="unpinButton" type="button">Unpin</button>
+        </div>
+        <div id="detailBody" class="detail-body">Hover or click a point.</div>
+      </aside>
+    </section>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </main>
+
+  <script src="/live-dashboard.js"></script>
+</body>
+</html>

@@ -21,6 +21,7 @@ npm install
 npm run ticker
 npm run ticker:ws
 npm run triangles
+npm run triangles:live
 npm run check
 npm test
 ```
@@ -56,3 +57,25 @@ UPBIT_TAKER_FEE_RATE=0.0005 npm run triangles
 ```
 
 The scanner does not submit orders and does not plot reverse cycles.
+
+## Live Dashboard
+
+Start the localhost dashboard:
+
+```bash
+npm run triangles:live
+```
+
+The server prints a URL like:
+
+```text
+http://127.0.0.1:3099
+```
+
+Use `PORT` to choose another port:
+
+```bash
+PORT=4100 npm run triangles:live
+```
+
+The browser reads from the local Node.js server only. Upbit market discovery, orderbook WebSocket subscriptions, multiplier calculation, caching, and capture saving are handled server-side. Captures are saved under `out/captures/`.
