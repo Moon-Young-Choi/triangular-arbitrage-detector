@@ -1,0 +1,67 @@
+{
+  "runMode": "OBSERVE",
+  "exchange": "upbit",
+  "enabledStartAssets": ["KRW", "BTC", "USDT"],
+  "observationOrderbookUnit": 5,
+  "validationOrderbookUnit": 30,
+  "executionMode": "LIMIT_IOC_AT_OBSERVED_BEST",
+  "enabledExecutionModes": ["LIMIT_IOC_AT_OBSERVED_BEST"],
+  "liveTradingEnabled": false,
+  "activeStrategyId": "topOfBookBaseline",
+  "executionPolicy": {
+    "stopPolicy": "CANCEL_OPEN_ORDERS",
+    "allowBestIoc": false,
+    "simulatedBalances": {
+      "KRW": 1000000,
+      "BTC": 0.05,
+      "USDT": 1000
+    },
+    "realRunLimits": {
+      "maxNotionalPerCycleByAsset": {
+        "KRW": 50000,
+        "BTC": 0.001,
+        "USDT": 50
+      },
+      "maxDailyLossByAsset": {
+        "KRW": 100000,
+        "BTC": 0.002,
+        "USDT": 100
+      },
+      "maxConsecutiveFailures": 3,
+      "maxOpenOrders": 3,
+      "maxCyclesPerMinute": 5
+    },
+    "marketDataGuards": {
+      "maxOldestLegAgeMs": 1000,
+      "maxLegTimestampSkewMs": 500,
+      "maxExchangeToServerLatencyMs": 1000,
+      "maxDecisionAgeMs": 1000
+    },
+    "executionGuards": {
+      "orderChanceTtlMs": 30000,
+      "accountBalanceTtlMs": 30000,
+      "validationOrderbookTtlMs": 1000,
+      "orderRateLimitPerSecond": 8
+    }
+  },
+  "candidateValidation": {
+    "startAmountByAsset": {
+      "KRW": 10000,
+      "BTC": 0.0002,
+      "USDT": 10
+    },
+    "minOrderAmountByAsset": {
+      "KRW": 5000,
+      "BTC": 0.00005,
+      "USDT": 5
+    },
+    "maxTouchRatioPerBestLevel": 0.3,
+    "minResidualRatioPerBestLevel": 0.1,
+    "minResidualAbsoluteByAsset": {
+      "KRW": 5000,
+      "BTC": 0.00005,
+      "USDT": 5
+    },
+    "minNetProfitRate": 0
+  }
+}

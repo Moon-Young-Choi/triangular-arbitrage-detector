@@ -22,13 +22,24 @@ test("synthetic KRW-BTC-ETH market set produces one triangle with two actual dir
   const { triangles, cycles } = cyclesFor(["KRW-BTC", "BTC-ETH", "KRW-ETH"]);
 
   assert.equal(triangles.length, 1);
-  assert.equal(cycles.length, 2);
+  assert.equal(cycles.length, 4);
   assert.deepEqual(cycles.map((cycle) => cycle.cycleId), [
-    "BTC|ETH|KRW:canonical",
-    "BTC|ETH|KRW:reverse",
+    "BTC|ETH|KRW:canonical:BTC",
+    "BTC|ETH|KRW:reverse:BTC",
+    "BTC|ETH|KRW:canonical:KRW",
+    "BTC|ETH|KRW:reverse:KRW",
   ]);
-  assert.deepEqual(cycles.find((cycle) => cycle.direction === "canonical").route, ["KRW", "BTC", "ETH", "KRW"]);
-  assert.deepEqual(cycles.find((cycle) => cycle.direction === "reverse").route, ["KRW", "ETH", "BTC", "KRW"]);
+  assert.deepEqual(
+    cycles.find((cycle) => cycle.direction === "canonical" && cycle.startAsset === "KRW").route,
+    ["KRW", "BTC", "ETH", "KRW"],
+  );
+  assert.deepEqual(
+    cycles.find((cycle) => cycle.direction === "reverse" && cycle.startAsset === "KRW").route,
+    ["KRW", "ETH", "BTC", "KRW"],
+  );
+  assert.equal(cycles.every((cycle) => cycle.route[0] === cycle.startAsset), true);
+  assert.equal(cycles.every((cycle) => cycle.route.at(-1) === cycle.endAsset), true);
+  assert.equal(cycles.every((cycle) => cycle.startAsset === cycle.endAsset), true);
 });
 
 test("rotations are not double-counted as separate triangles", () => {
@@ -42,8 +53,16 @@ test("all-hub triangle is counted once and uses the hub ring route", () => {
   const canonical = cycles.find((cycle) => cycle.direction === "canonical");
 
   assert.equal(triangles.length, 1);
-  assert.equal(cycles.length, 2);
-  assert.deepEqual(canonical.route, ["KRW", "BTC", "USDT", "KRW"]);
+  assert.equal(cycles.length, 6);
+  assert.deepEqual(
+    cycles.find((cycle) => cycle.direction === "canonical" && cycle.startAsset === "KRW").route,
+    ["KRW", "BTC", "USDT", "KRW"],
+  );
+  assert.deepEqual(
+    cycles.map((cycle) => cycle.startAsset).sort(),
+    ["BTC", "BTC", "KRW", "KRW", "USDT", "USDT"],
+  );
+  assert.equal(canonical.startAsset, "BTC");
   assert.equal(hubBreakdown["KRW-BTC-USDT"], 1);
 });
 
@@ -51,16 +70,30 @@ test("BTC-USDT-X triangles use BTC -> USDT -> X -> BTC", () => {
   const { cycles } = cyclesFor(["BTC-USDT", "BTC-ETH", "USDT-ETH"]);
   const canonical = cycles.find((cycle) => cycle.direction === "canonical");
 
-  assert.equal(cycles.length, 2);
-  assert.deepEqual(canonical.route, ["BTC", "USDT", "ETH", "BTC"]);
+  assert.equal(cycles.length, 4);
+  assert.deepEqual(
+    cycles.find((cycle) => cycle.direction === "canonical" && cycle.startAsset === "BTC").route,
+    ["BTC", "USDT", "ETH", "BTC"],
+  );
+  assert.deepEqual(
+    cycles.find((cycle) => cycle.direction === "canonical" && cycle.startAsset === "USDT").route,
+    ["USDT", "ETH", "BTC", "USDT"],
+  );
 });
 
 test("KRW-USDT-X triangles use USDT -> KRW -> X -> USDT", () => {
   const { cycles } = cyclesFor(["KRW-USDT", "KRW-ETH", "USDT-ETH"]);
   const canonical = cycles.find((cycle) => cycle.direction === "canonical");
 
-  assert.equal(cycles.length, 2);
-  assert.deepEqual(canonical.route, ["USDT", "KRW", "ETH", "USDT"]);
+  assert.equal(cycles.length, 4);
+  assert.deepEqual(
+    cycles.find((cycle) => cycle.direction === "canonical" && cycle.startAsset === "USDT").route,
+    ["USDT", "KRW", "ETH", "USDT"],
+  );
+  assert.deepEqual(
+    cycles.find((cycle) => cycle.direction === "reverse" && cycle.startAsset === "KRW").markets,
+    ["KRW-USDT", "USDT-ETH", "KRW-ETH"],
+  );
 });
 
 test("incomplete triangles are not counted", () => {
@@ -90,8 +123,8 @@ test("BASE -> QUOTE conversion sells at best bid", () => {
 
 test("reverse gross multiplier is calculated from its own bid/ask route", () => {
   const { cycles } = cyclesFor(["KRW-BTC", "BTC-ETH", "KRW-ETH"]);
-  const canonical = cycles.find((cycle) => cycle.direction === "canonical");
-  const reverse = cycles.find((cycle) => cycle.direction === "reverse");
+  const canonical = cycles.find((cycle) => cycle.direction === "canonical" && cycle.startAsset === "KRW");
+  const reverse = cycles.find((cycle) => cycle.direction === "reverse" && cycle.startAsset === "KRW");
   const orderbooks = new Map([
     ["KRW-BTC", {
       market: "KRW-BTC",

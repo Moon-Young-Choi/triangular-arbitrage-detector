@@ -1,26 +1,42 @@
 (function () {
   const COLORS = {
-    canonical: "#14845f",
-    reverse: "#d83f7b",
+    profit: "#d83f7b",
     neutral: "#2d6f9f",
     unavailable: "#aeb8c5",
     orange: "#e08a17",
   };
   const GROUP_LABELS = {
-    KRW_BTC: "KRW -> BTC",
-    BTC_USDT: "BTC -> USDT",
-    USDT_KRW: "USDT -> KRW",
-    OTHER: "Other",
+    KRW_START: "KRW Start",
+    BTC_START: "BTC Start",
+    USDT_START: "USDT Start",
+    ALL: "All",
   };
 
   const chart = document.getElementById("chart");
   const summaryCards = document.getElementById("summaryCards");
   const performanceCards = document.getElementById("performanceCards");
+  const exchangeCards = document.getElementById("exchangeCards");
+  const marketConfigCards = document.getElementById("marketConfigCards");
+  const executionCards = document.getElementById("executionCards");
+  const realRunTables = document.getElementById("realRunTables");
+  const settingsConfig = document.getElementById("settingsConfig");
+  const strategyCards = document.getElementById("strategyCards");
+  const strategyList = document.getElementById("strategyList");
+  const logTable = document.getElementById("logTable");
+  const dryRunSummaryCards = document.getElementById("dryRunSummaryCards");
+  const logModeFilter = document.getElementById("logModeFilter");
+  const logTypeFilter = document.getElementById("logTypeFilter");
+  const logStartAssetFilter = document.getElementById("logStartAssetFilter");
+  const logStrategyFilter = document.getElementById("logStrategyFilter");
+  const logCycleFilter = document.getElementById("logCycleFilter");
+  const refreshLogsButton = document.getElementById("refreshLogsButton");
+  const exportDryRunJsonButton = document.getElementById("exportDryRunJsonButton");
+  const exportDryRunCsvButton = document.getElementById("exportDryRunCsvButton");
   const connectionLine = document.getElementById("connectionLine");
   const detailBody = document.getElementById("detailBody");
+  const startButton = document.getElementById("startButton");
   const pauseButton = document.getElementById("pauseButton");
-  const resyncButton = document.getElementById("resyncButton");
-  const captureButton = document.getElementById("captureButton");
+  const stopButton = document.getElementById("stopButton");
   const unpinButton = document.getElementById("unpinButton");
   const feeInput = document.getElementById("feeInput");
   const staleInput = document.getElementById("staleInput");
@@ -28,22 +44,18 @@
   const showUnavailableInput = document.getElementById("showUnavailableInput");
   const groupFilters = document.getElementById("groupFilters");
   const toast = document.getElementById("toast");
-
-  const hoverTooltip = document.createElement("div");
-  hoverTooltip.className = "hover-tooltip";
-  document.body.appendChild(hoverTooltip);
+  const tabButtons = [...document.querySelectorAll("[data-tab-target]")];
+  const tabPanels = [...document.querySelectorAll("[data-tab-panel]")];
 
   let latestState = null;
   let chartRows = [];
   let cycleIdToStateIndex = new Map();
   let cycleIdToPointIndex = new Map();
-  let paused = false;
-  let pinned = false;
   let chartInitialized = false;
+  let chartRenderPending = false;
   let eventsBound = false;
   let clampRelayout = false;
   let toastTimer = null;
-  let settingsTimer = null;
   let liveSocket = null;
   let reconnectTimer = null;
   let reconnectAttempt = 0;
@@ -54,8 +66,10 @@
   let renderedFrames = 0;
   let renderFramesPerSec = 0;
   let lastRenderDurationMs = 0;
+  let renderDurationSamples = [];
+  let cachedLogRows = [];
   let lastFrameReportAt = performance.now();
-  const enabledGroups = new Set(Object.keys(GROUP_LABELS));
+  const enabledGroups = new Set(["KRW_START", "BTC_START", "USDT_START"]);
 
   function parseNumber(value, fallback) {
     const parsed = Number.parseFloat(value);
@@ -140,6 +154,274 @@
     return `<div class="metric-card"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(value)}</span></div>`;
   }
 
+  function statusRow(label, value, statusClass = "") {
+    const valueHtml = statusClass
+      ? `<span class="status-pill ${escapeHtml(statusClass)}">${escapeHtml(value)}</span>`
+      : `<span>${escapeHtml(value)}</span>`;
+
+    return `<div class="status-row"><strong>${escapeHtml(label)}</strong>${valueHtml}</div>`;
+  }
+
+  function runtimeConfig() {
+    return (latestState && latestState.runtimeConfig) || {};
+  }
+
+  function renderConfigTable(config) {
+    const rows = Object.entries(config || {})
+      .map(([key, value]) => (
+        `<tr><th>${escapeHtml(key)}</th><td>${escapeHtml(Array.isArray(value) ? value.join(", ") : value)}</td></tr>`
+      ))
+      .join("");
+
+    const readiness = latestState && latestState.readiness;
+    const readinessRows = readiness && Array.isArray(readiness.items)
+      ? readiness.items.map((entry) => statusRow(entry.label, entry.passed ? "PASS" : "FAIL", entry.passed ? "ok" : "off")).join("")
+      : statusRow("Readiness", "n/a");
+
+    settingsConfig.innerHTML = (
+      (rows
+        ? `<div class="detail-section"><div class="detail-title">Runtime config</div><div class="table-wrap"><table><tbody>${rows}</tbody></table></div></div>`
+        : "<div class=\"status-list wide\"><div class=\"status-row\"><strong>Runtime config</strong><span>n/a</span></div></div>") +
+      `<div class="detail-section"><div class="detail-title">Real-run readiness</div><div class="status-list wide">${readinessRows}</div></div>`
+    );
+  }
+
+  function updateExchangeCards() {
+    exchangeCards.innerHTML = [
+      statusRow("Upbit", "Enabled", "ok"),
+      statusRow("Binance", "Not implemented", "off"),
+      statusRow("Bithumb", "Not implemented", "off"),
+      statusRow("Bybit", "Not implemented", "off"),
+    ].join("");
+  }
+
+  function updateRuntimePanels(metrics) {
+    const config = runtimeConfig();
+    const summary = latestState.summary || {};
+    const stores = latestState.orderbookStores || {};
+    const privateCache = latestState.privateCacheStatus || {};
+    const observation = stores.observation || {};
+    const validation = stores.validation || {};
+    const feedStatus = latestState.feedStatus || {};
+    const observationFeed = feedStatus.observation || latestState.wsStatus || {};
+    const validationFeed = feedStatus.validation || {};
+
+    marketConfigCards.innerHTML = [
+      statusRow("Exchange", config.exchange || "upbit"),
+      statusRow("Start assets", (config.enabledStartAssets || ["KRW", "BTC", "USDT"]).join(", ")),
+      statusRow("Observation depth", config.observationOrderbookUnit || "n/a"),
+      statusRow("Validation depth", config.validationOrderbookUnit || "n/a"),
+      statusRow("Observation feed", `${observationFeed.openConnectionCount || 0}/${observationFeed.connectionCount || 0} open`),
+      statusRow("Validation feed", `${validationFeed.openConnectionCount || 0}/${validationFeed.connectionCount || 0} open`),
+      statusRow("Observation markets", observation.marketCount || "n/a"),
+      statusRow("Validation markets", validation.marketCount || "n/a"),
+      statusRow("Observation stale", observation.staleCount || 0),
+      statusRow("Validation stale", validation.staleCount || 0),
+      statusRow("Observation latency", formatMs(observation.averageLatencyMs)),
+      statusRow("Validation latency", formatMs(validation.averageLatencyMs)),
+      statusRow("Fee rate", String(metrics.feeRate)),
+      statusRow("Break-even", formatNumber(metrics.executableBreakEvenGross)),
+      statusRow("Stale threshold", `${summary.staleOrderbookMs || staleInput.value} ms`),
+      statusRow("Required markets", summary.requiredMarketCount || "n/a"),
+    ].join("");
+
+    executionCards.innerHTML = [
+      statusRow("Engine state", latestState.engineState || (latestState.engine && latestState.engine.state) || "n/a"),
+      statusRow("Execution context", latestState.execution && latestState.execution.mode ? latestState.execution.mode : config.runMode || "OBSERVE"),
+      statusRow("Run mode", config.runMode || "OBSERVE"),
+      statusRow("Execution mode", config.executionMode || "LIMIT_IOC_AT_OBSERVED_BEST"),
+      statusRow("Live trading", config.liveTradingEnabled ? "Enabled" : "Disabled", config.liveTradingEnabled ? "" : "off"),
+      statusRow("Guard healthy", latestState.guardStatus && latestState.guardStatus.healthy ? "Yes" : "No", latestState.guardStatus && latestState.guardStatus.healthy ? "ok" : "off"),
+      statusRow("Consecutive failures", latestState.guardStatus ? latestState.guardStatus.consecutiveFailures : "n/a"),
+      statusRow("Open orders guard", latestState.guardStatus ? `${latestState.guardStatus.openOrderCount}/${latestState.guardStatus.maxOpenOrders}` : "n/a"),
+      statusRow("Active real executions", latestState.guardStatus ? latestState.guardStatus.activeRealExecutionCount : "n/a"),
+      statusRow("Readiness", latestState.readiness ? (latestState.readiness.passed ? "PASS" : "FAIL") : "n/a", latestState.readiness && latestState.readiness.passed ? "ok" : "off"),
+      statusRow(
+        "Dry-run balances",
+        latestState.execution && latestState.execution.dryRunBalances
+          ? Object.entries(latestState.execution.dryRunBalances).map(([asset, value]) => `${asset} ${value}`).join(" / ")
+          : "n/a",
+      ),
+      statusRow("Private WS", latestState.privateWsStatus ? latestState.privateWsStatus.status : "not configured"),
+      statusRow("Order chance cache", privateCache.orderChanceFresh ? "Fresh" : "Stale", privateCache.orderChanceFresh ? "ok" : "off"),
+      statusRow("Account balance cache", privateCache.accountBalanceFresh ? "Fresh" : "Stale", privateCache.accountBalanceFresh ? "ok" : "off"),
+      statusRow("Tracked orders", latestState.execution && latestState.execution.orders ? latestState.execution.orders.length : 0),
+      statusRow("Recent fills", latestState.execution && latestState.execution.fills ? latestState.execution.fills.length : 0),
+      statusRow("Order submission", config.liveTradingEnabled ? "Guarded real executor" : "Disabled by config", config.liveTradingEnabled ? "ok" : "off"),
+      statusRow("Fill tracking", latestState.privateWsStatus && latestState.privateWsStatus.status === "open" ? "Private MyOrder WS" : "REST fallback / dry-run logs"),
+    ].join("");
+
+    renderConfigTable(config);
+    updateExecutionTables();
+  }
+
+  function compactJson(value) {
+    if (value === null || value === undefined) return "n/a";
+    if (typeof value !== "object") return value;
+    return JSON.stringify(value);
+  }
+
+  function updateExecutionTables() {
+    const execution = latestState.execution || {};
+    const orders = (execution.orders || []).filter((row) => row.mode !== "DRY_RUN").slice(-30).reverse();
+    const fills = (execution.fills || []).filter((row) => row.mode !== "DRY_RUN").slice(-30).reverse();
+
+    const orderRows = orders.map((row) => (
+      `<tr><td>${escapeHtml(row.uuid || row.identifier || "n/a")}</td>` +
+      `<td>${escapeHtml(row.market || "n/a")}</td>` +
+      `<td>${escapeHtml(row.side || "n/a")}</td>` +
+      `<td>${escapeHtml(row.state || "n/a")}</td>` +
+      `<td>${escapeHtml(formatNumber(row.price, 8))}</td>` +
+      `<td>${escapeHtml(formatNumber(row.remainingVolume, 8))}</td></tr>`
+    )).join("");
+    const fillRows = fills.map((row) => (
+      `<tr><td>${escapeHtml(row.uuid || row.identifier || "n/a")}</td>` +
+      `<td>${escapeHtml(row.market || "n/a")}</td>` +
+      `<td>${escapeHtml(formatNumber(row.executedVolume, 8))}</td>` +
+      `<td>${escapeHtml(formatNumber(row.paidFee, 8))}</td>` +
+      `<td>${escapeHtml(formatNumber(row.tradeFee, 8))}</td>` +
+      `<td>${escapeHtml(formatTime(row.tradeTimestamp || row.eventTimestamp))}</td></tr>`
+    )).join("");
+
+    realRunTables.innerHTML = (
+      `<div class="detail-section"><div class="detail-title">Latest real-run orders</div>` +
+      `<div class="table-wrap"><table><thead><tr>` +
+      `<th>UUID/Identifier</th><th>Market</th><th>Side</th><th>State</th><th>Price</th><th>Remaining</th>` +
+      `</tr></thead><tbody>${orderRows || "<tr><td colspan=\"6\">n/a</td></tr>"}</tbody></table></div></div>` +
+      `<div class="detail-section"><div class="detail-title">Latest real-run fills</div>` +
+      `<div class="table-wrap"><table><thead><tr>` +
+      `<th>UUID/Identifier</th><th>Market</th><th>Executed</th><th>Paid fee</th><th>Trade fee</th><th>Time</th>` +
+      `</tr></thead><tbody>${fillRows || "<tr><td colspan=\"6\">n/a</td></tr>"}</tbody></table></div></div>`
+    );
+  }
+
+  function updateStrategyPanels() {
+    const strategy = latestState.strategy || {};
+    const active = strategy.activeStrategy || {};
+
+    strategyCards.innerHTML = [
+      statusRow("Active strategy", active.name || strategy.activeStrategyId || "n/a"),
+      statusRow("Strategy id", active.id || "n/a"),
+      statusRow("Version", active.version || "n/a"),
+      statusRow("Hash", active.hash || "n/a"),
+      statusRow("Source", "Source files"),
+      statusRow("Dashboard editing", "Disabled", "off"),
+      statusRow("Engine state", latestState.engineState || "n/a"),
+    ].join("");
+
+    strategyList.innerHTML = (strategy.availableStrategies || [])
+      .map((item) => (
+        `<article class="strategy-card">` +
+        `<h3>${escapeHtml(item.name)} ${item.id === active.id ? "<span class=\"status-pill ok\">Active</span>" : ""}</h3>` +
+        `<p>${escapeHtml(item.description)}</p>` +
+        `<p>v${escapeHtml(item.version)} | ${escapeHtml(item.hash || "n/a")}</p>` +
+        `</article>`
+      ))
+      .join("");
+  }
+
+  function updateLogPanel() {
+    const events = cachedLogRows.length > 0 ? cachedLogRows : latestState.eventLog || [];
+
+    if (events.length === 0) {
+      logTable.innerHTML = "<div class=\"status-list wide\"><div class=\"status-row\"><strong>Events</strong><span>n/a</span></div></div>";
+      return;
+    }
+
+    const rows = events.slice(-80).reverse().map((event) => (
+      `<tr>` +
+      `<td>${escapeHtml(formatTime(event.timestamp))}</td>` +
+      `<td>${escapeHtml(event.mode || "n/a")}</td>` +
+      `<td>${escapeHtml(event.normalizedType || event.type)}</td>` +
+      `<td>${escapeHtml(event.startAsset || "n/a")}</td>` +
+      `<td>${escapeHtml(event.cycleId || event.strategyId || event.planId || "n/a")}</td>` +
+      `<td>${escapeHtml(event.reason || event.validationReason || event.message || "n/a")}</td>` +
+      `</tr>`
+    )).join("");
+
+    logTable.innerHTML = (
+      `<div class="table-wrap"><table><thead><tr>` +
+      `<th>Time</th><th>Mode</th><th>Type</th><th>Start</th><th>Subject</th><th>Reason</th>` +
+      `</tr></thead><tbody>${rows}</tbody></table></div>`
+    );
+  }
+
+  function updateDryRunSummary(summary) {
+    if (!summary) {
+      dryRunSummaryCards.innerHTML = "";
+      return;
+    }
+
+    dryRunSummaryCards.innerHTML = [
+      metric("Opportunities", summary.totalOpportunities),
+      metric("Accepted", summary.accepted),
+      metric("Rejected", summary.rejected),
+      metric("Sim done", summary.simulatedCompleteCycles),
+      metric("Sim failed", summary.simulatedFailedCycles),
+      metric("Expected net", formatNumber(summary.expectedNetProfit, 8)),
+      metric("Sim net", formatNumber(summary.simulatedNetProfit, 8)),
+      metric("Latency p95", formatMs(summary.latencyDistribution && summary.latencyDistribution.p95Ms)),
+    ].join("");
+  }
+
+  function logQueryParams() {
+    const params = new URLSearchParams();
+    if (logModeFilter.value) params.set("mode", logModeFilter.value);
+    if (logTypeFilter.value) params.set("type", logTypeFilter.value);
+    if (logStartAssetFilter.value) params.set("startAsset", logStartAssetFilter.value);
+    if (logStrategyFilter.value) params.set("strategyId", logStrategyFilter.value);
+    if (logCycleFilter.value) params.set("cycleId", logCycleFilter.value);
+    params.set("limit", "500");
+    return params;
+  }
+
+  async function refreshLogs() {
+    const response = await fetch(`/api/logs?${logQueryParams().toString()}`);
+    const payload = await response.json();
+
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.error || "Failed to load logs");
+    }
+
+    cachedLogRows = payload.logs || [];
+    updateLogPanel();
+
+    const report = await fetch("/api/dry-run-report?limit=5000").then((item) => item.json());
+    updateDryRunSummary(report.summary);
+  }
+
+  function downloadBlob(blob, filename) {
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  }
+
+  async function exportDryRun(format) {
+    const response = await fetch(`/api/dry-run-report?format=${format}`);
+    const blob = await response.blob();
+    downloadBlob(blob, `dry-run-report.${format}`);
+  }
+
+  function averageRenderMs() {
+    if (renderDurationSamples.length === 0) return null;
+    return renderDurationSamples.reduce((sum, value) => sum + value, 0) / renderDurationSamples.length;
+  }
+
+  function recordRenderDuration(durationMs) {
+    lastRenderDurationMs = durationMs;
+    renderDurationSamples.push(durationMs);
+
+    if (renderDurationSamples.length > 120) {
+      renderDurationSamples = renderDurationSamples.slice(-120);
+    }
+  }
+
+  function chartIsVisible() {
+    return chart.offsetParent !== null;
+  }
+
   function rebuildStateIndex() {
     cycleIdToStateIndex = new Map();
     (latestState.cycles || []).forEach((row, index) => {
@@ -186,8 +468,7 @@
   }
 
   function rowColor(row) {
-    if (row.statusClass === "canonical-profit") return COLORS.canonical;
-    if (row.statusClass === "reverse-profit") return COLORS.reverse;
+    if (row.statusClass === "canonical-profit" || row.statusClass === "reverse-profit") return COLORS.profit;
     if (row.statusClass === "unavailable") return COLORS.unavailable;
     return COLORS.neutral;
   }
@@ -196,6 +477,10 @@
     return {
       triangleId: row.triangleId,
       cycleId: row.cycleId,
+      routeVariantId: row.routeVariantId,
+      legacyCycleId: row.legacyCycleId,
+      startAsset: row.startAsset,
+      endAsset: row.endAsset,
       direction: row.direction,
       directionLabel: row.directionLabel,
       route: row.route,
@@ -209,10 +494,24 @@
       feeRate: row.feeRate,
       executableBreakEvenGross: row.executableBreakEvenGross,
       status: row.statusClass,
+      validationStatus: row.validationStatus,
+      validationReason: row.validationReason,
+      executableStartAmount: row.executableStartAmount,
+      maxExecutableStartAmount: row.maxExecutableStartAmount,
+      limitingLeg: row.limitingLeg,
+      limitingMarket: row.limitingMarket,
+      expectedSlippageBps: row.expectedSlippageBps,
+      bestLevelTouchRatio: row.bestLevelTouchRatio,
+      residualAfterOrder: row.residualAfterOrder,
+      strategyId: row.strategyId,
+      strategyAccepted: row.strategyAccepted,
+      strategyReason: row.strategyReason,
       assets: row.assets,
       markets: row.markets,
       legs: row.legs,
       latency: row.latency,
+      timingTrace: row.timingTrace,
+      timingBreakdown: row.timingBreakdown,
       history: row.history,
       calculatedAtEpochMs: row.calculatedAtEpochMs,
     };
@@ -225,6 +524,10 @@
     const metrics = feeMetrics(parseNumber(feeInput.value, 0));
     const ws = latestState.wsStatus || {};
     const wsLabel = `${ws.openConnectionCount || 0}/${ws.connectionCount || 0} open`;
+    updateExchangeCards();
+    updateRuntimePanels(metrics);
+    updateStrategyPanels();
+    updateLogPanel();
 
     summaryCards.innerHTML = [
       metric("Markets", latestState.summary.marketsLoaded),
@@ -255,7 +558,9 @@
     const eventLoop = metrics.eventLoop || {};
     const rates = metrics.rates || {};
     const latency = metrics.latency || {};
+    const browser = metrics.browser || {};
     const mhzSuffix = cpu.currentMHzFallback ? " fallback" : "";
+    const localAverageRenderMs = averageRenderMs();
 
     performanceCards.innerHTML = [
       metric("CPU", cpu.model || "n/a"),
@@ -268,11 +573,14 @@
       metric("ELU", formatCompact(eventLoop.utilization, 4)),
       metric("Loop p95", formatMs(eventLoop.delay && eventLoop.delay.p95Ms)),
       metric("Upbit msg/s", formatCompact(rates.upbitOrderbookMessagesPerSec, 1)),
+      metric("Observation msg/s", formatCompact(rates.observationOrderbookMessagesPerSec, 1)),
+      metric("Validation msg/s", formatCompact(rates.validationOrderbookMessagesPerSec, 1)),
       metric("Parsed msg/s", formatCompact(rates.parsedMessagesPerSec, 1)),
       metric("Recalc/s", formatCompact(rates.recalculatedCyclesPerSec, 1)),
       metric("Pushed/s", formatCompact(rates.pushedPointUpdatesPerSec, 1)),
       metric("Render FPS", formatCompact(renderFramesPerSec, 1)),
       metric("Render ms", formatMs(lastRenderDurationMs)),
+      metric("Avg render", formatMs(browser.averageRenderMs || localAverageRenderMs)),
       metric("Latency p95", formatMs(latency.p95)),
     ].join("");
   }
@@ -281,7 +589,9 @@
     const groups = latestState.groups || [];
     groupFilters.innerHTML = groups
       .map((group) => {
-        const checked = enabledGroups.has(group.group) ? "checked" : "";
+        const checked = group.group === "ALL"
+          ? (enabledGroups.size >= 3 ? "checked" : "")
+          : (enabledGroups.has(group.group) ? "checked" : "");
         const label = GROUP_LABELS[group.group] || group.groupLabel;
         return (
           `<label><input type="checkbox" data-group="${group.group}" ${checked}> ` +
@@ -412,6 +722,13 @@
     updateSummary(chartRows);
     updatePerformanceCards();
 
+    if (!chartIsVisible()) {
+      chartRenderPending = true;
+      return;
+    }
+
+    chartRenderPending = false;
+
     const yValues = chartRows
       .map((row) => row.y)
       .filter((value) => value !== null && Number.isFinite(value));
@@ -435,11 +752,12 @@
         color: chartRows.map((row) => row.markerColor),
         opacity: 0.86,
         line: {
-          width: chartRows.map((row) => (row.direction === "reverse" ? 1.2 : 0)),
-          color: chartRows.map((row) => (row.direction === "reverse" ? "#7a2346" : "rgba(0,0,0,0)")),
+          width: chartRows.map((row) => (row.direction === "reverse" ? 1.4 : 0.4)),
+          color: chartRows.map((row) => (row.direction === "reverse" ? "#7a2346" : "rgba(21,25,34,0.28)")),
         },
       },
-      hovertemplate: "<b>%{text}</b><extra></extra>",
+      hoverinfo: "none",
+      hovertemplate: null,
     };
 
     const layout = {
@@ -448,7 +766,6 @@
       plot_bgcolor: "#ffffff",
       dragmode: "zoom",
       uirevision: "q-gagarin-live",
-      hovermode: "closest",
       xaxis: {
         title: "Triangle cycle index",
         type: "linear",
@@ -468,6 +785,7 @@
       shapes: buildShapes(metrics),
       annotations: buildAnnotations(metrics),
       showlegend: false,
+      hovermode: false,
     };
 
     if (autoScaleInput.checked) {
@@ -482,7 +800,7 @@
       modeBarButtonsToAdd: ["pan2d", "zoom2d", "resetScale2d", "autoScale2d"],
     }).then(() => {
       chartInitialized = true;
-      lastRenderDurationMs = performance.now() - started;
+      recordRenderDuration(performance.now() - started);
       renderedFrames += 1;
       clampCurrentXRange();
     });
@@ -586,13 +904,22 @@
 
   function latencyRows(row) {
     const latency = row.latency || {};
+    const timing = row.timingBreakdown || {};
     const items = [
       ["Upbit -> server", `${formatMs(latency.upbitToServerMs)} clock-skew sensitive`],
       ["Server parse", formatMs(latency.serverParseMs)],
+      ["Socket parse", formatMs(timing.socketParseMs)],
+      ["Normalize", formatMs(timing.normalizeMs)],
+      ["Cache write", formatMs(timing.cacheWriteMs)],
+      ["Affected lookup", formatMs(timing.affectedCycleLookupMs)],
       ["Server calc", formatMs(latency.serverCalcMs)],
+      ["Calc trace", formatMs(timing.calcMs)],
+      ["Strategy", formatMs(timing.strategyMs)],
+      ["Risk", formatMs(timing.riskMs)],
       ["Server queue", formatMs(latency.serverQueueMs)],
       ["Server -> client", formatMs(latency.serverToClientMs)],
       ["Client render", formatMs(latency.clientRenderMs)],
+      ["Browser apply -> render", formatMs(timing.browserApplyToRenderMs)],
       ["End -> display", `${formatMs(latency.estimatedEndToDisplayMs)} clock-skew sensitive`],
     ];
 
@@ -616,6 +943,25 @@
       ["Break-even", formatNumber(row.executableBreakEvenGross, 8)],
       ["Status", row.statusClass || row.status],
       ["Reason", row.unavailableReason || row.staleReason || "n/a"],
+      ["Start asset", row.startAsset || "n/a"],
+      ["End asset", row.endAsset || "n/a"],
+      ["Route variant", row.routeVariantId || row.cycleId],
+      ["Validation", row.validationStatus || "n/a"],
+      ["Validation reason", row.validationReason || "n/a"],
+      ["Execution feasibility", row.executionFeasibility || "n/a"],
+      ["Executable start", formatNumber(row.executableStartAmount, 8)],
+      ["Max executable", formatNumber(row.maxExecutableStartAmount, 8)],
+      ["Limiting leg", row.limitingLeg || "n/a"],
+      ["Limiting market", row.limitingMarket || "n/a"],
+      ["Expected slippage", row.expectedSlippageBps === null || row.expectedSlippageBps === undefined
+        ? "n/a"
+        : `${Number(row.expectedSlippageBps).toFixed(3)} bps`],
+      ["Best touch ratio", row.bestLevelTouchRatio === null || row.bestLevelTouchRatio === undefined
+        ? "n/a"
+        : formatPercent(row.bestLevelTouchRatio)],
+      ["Residual after order", formatNumber(row.residualAfterOrder, 8)],
+      ["Strategy", row.strategyId || "n/a"],
+      ["Strategy reason", row.strategyReason || "n/a"],
       ["Freshness", `newest ${formatMs(row.newestLegAgeMs)} / oldest ${formatMs(row.oldestLegAgeMs)}`],
       ["Calculated", formatTime(row.calculatedAtEpochMs || row.calculatedAtIso)],
     ];
@@ -637,39 +983,12 @@
     detailBody.innerHTML = detailRows(row);
   }
 
-  function showHover(row, event) {
-    if (!row) return;
-    const pointer = event || { clientX: 16, clientY: 16 };
-    hoverTooltip.innerHTML = detailRows(row);
-    hoverTooltip.classList.add("show");
-    const margin = 14;
-    const rect = hoverTooltip.getBoundingClientRect();
-    const left = Math.min(window.innerWidth - rect.width - margin, pointer.clientX + margin);
-    const top = Math.min(window.innerHeight - rect.height - margin, pointer.clientY + margin);
-    hoverTooltip.style.left = `${Math.max(margin, left)}px`;
-    hoverTooltip.style.top = `${Math.max(margin, top)}px`;
-  }
-
-  function hideHover() {
-    hoverTooltip.classList.remove("show");
-  }
-
   function bindPlotlyEvents() {
     if (eventsBound) return;
     eventsBound = true;
 
-    chart.on("plotly_hover", (event) => {
-      if (!event.points || !event.points[0]) return;
-      const row = chartRows[event.points[0].pointIndex];
-      showHover(row, event.event);
-      if (!pinned) setDetail(row);
-    });
-
-    chart.on("plotly_unhover", hideHover);
-
     chart.on("plotly_click", (event) => {
       if (!event.points || !event.points[0]) return;
-      pinned = true;
       setDetail(chartRows[event.points[0].pointIndex]);
     });
 
@@ -686,7 +1005,14 @@
   }
 
   function applyState(state) {
+    const dashboardReceiveEpochMs = Date.now();
     latestState = state;
+    (latestState.cycles || []).forEach((row) => {
+      row.timingTrace = {
+        ...(row.timingTrace || {}),
+        dashboardReceiveEpochMs,
+      };
+    });
     rebuildStateIndex();
     if (!feeInput.dataset.initialized) {
       feeInput.value = String(state.summary.feeRate || 0);
@@ -706,6 +1032,11 @@
         ...(latestState.cycles[index].latency || {}),
         ...(changed.latency || {}),
       };
+      const timingTrace = {
+        ...(latestState.cycles[index].timingTrace || {}),
+        ...(changed.timingTrace || {}),
+        dashboardReceiveEpochMs: deltaMeta.clientReceivedEpochMs,
+      };
 
       if (Number.isFinite(deltaMeta.clientReceivedEpochMs) && Number.isFinite(deltaMeta.sentAtEpochMs)) {
         latency.serverToClientMs = deltaMeta.clientReceivedEpochMs - deltaMeta.sentAtEpochMs;
@@ -715,6 +1046,7 @@
         ...latestState.cycles[index],
         ...changed,
         latency,
+        timingTrace,
       };
       pendingChangedCycleIds.add(changed.cycleId);
     }
@@ -731,8 +1063,16 @@
 
     const started = performance.now();
     const applyStartEpochMs = Date.now();
+    const browserApplyStartPerfMs = performance.now();
     chartRows = visibleDecoratedRows();
     rebuildPointIndex();
+    updateSummary(chartRows);
+    updatePerformanceCards();
+
+    if (!chartIsVisible()) {
+      chartRenderPending = true;
+      return;
+    }
 
     const update = {
       x: [chartRows.map((row) => row.x)],
@@ -742,13 +1082,14 @@
       customdata: [chartRows.map(buildCustomData)],
       "marker.color": [chartRows.map((row) => row.markerColor)],
       "marker.symbol": [chartRows.map((row) => row.markerSymbol)],
-      "marker.line.width": [chartRows.map((row) => (row.direction === "reverse" ? 1.2 : 0))],
-      "marker.line.color": [chartRows.map((row) => (row.direction === "reverse" ? "#7a2346" : "rgba(0,0,0,0)"))],
+      "marker.line.width": [chartRows.map((row) => (row.direction === "reverse" ? 1.4 : 0.4))],
+      "marker.line.color": [chartRows.map((row) => (row.direction === "reverse" ? "#7a2346" : "rgba(21,25,34,0.28)"))],
     };
 
     Plotly.restyle(chart, update, [0]).then(() => {
       const plotUpdatedEpochMs = Date.now();
-      lastRenderDurationMs = performance.now() - started;
+      const browserRenderDonePerfMs = performance.now();
+      recordRenderDuration(performance.now() - started);
       for (const cycleId of applyingCycleIds) {
         const index = cycleIdToStateIndex.get(cycleId);
         if (index === undefined) continue;
@@ -762,9 +1103,20 @@
           clientApplyStartEpochMs: applyStartEpochMs,
           clientPlotUpdatedEpochMs: plotUpdatedEpochMs,
         };
+        const timingTrace = {
+          ...(row.timingTrace || {}),
+          browserApplyStartPerfMs,
+          browserRenderDonePerfMs,
+        };
+        const timingBreakdown = {
+          ...(row.timingBreakdown || {}),
+          browserApplyToRenderMs: browserRenderDonePerfMs - browserApplyStartPerfMs,
+        };
         latestState.cycles[index] = {
           ...row,
           latency,
+          timingTrace,
+          timingBreakdown,
         };
       }
 
@@ -783,7 +1135,7 @@
   }
 
   function scheduleRestyle() {
-    if (pendingFrame || paused) return;
+    if (pendingFrame) return;
     pendingFrame = true;
     requestAnimationFrame(restyleChart);
   }
@@ -805,14 +1157,13 @@
       sentAtEpochMs: delta.sentAtEpochMs,
     });
 
-    if (paused) {
-      connectionLine.textContent = `Paused | latest server update ${formatTime(latestState.summary.lastUpdateTime)}`;
-      updatePerformanceCards();
-      return;
-    }
-
-    if (pendingChangedCycleIds.size > 0 || delta.metrics) {
+    if (pendingChangedCycleIds.size > 0) {
       scheduleRestyle();
+    } else if (delta.metrics) {
+      chartRows = visibleDecoratedRows();
+      rebuildPointIndex();
+      updateSummary(chartRows);
+      updatePerformanceCards();
     }
   }
 
@@ -870,7 +1221,20 @@
       }
 
       if (message.type === "status") {
-        if (latestState) latestState.wsStatus = message.status;
+        if (latestState) {
+          if (message.feedName === "validation") {
+            latestState.feedStatus = {
+              ...(latestState.feedStatus || {}),
+              validation: message.status,
+            };
+          } else {
+            latestState.wsStatus = message.status;
+            latestState.feedStatus = {
+              ...(latestState.feedStatus || {}),
+              observation: message.status,
+            };
+          }
+        }
         return;
       }
 
@@ -899,25 +1263,46 @@
     applyState(await response.json());
   }
 
-  function sendSettingsSoon() {
-    clearTimeout(settingsTimer);
-    settingsTimer = setTimeout(async () => {
-      try {
-        const response = await fetch("/api/settings", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            feeRate: parseNumber(feeInput.value, 0),
-            staleOrderbookMs: parseNumber(staleInput.value, 3000),
-          }),
-        });
-        if (response.ok) {
-          applyState(await response.json());
-        }
-      } catch (error) {
-        showToast(error.message);
+  async function sendEngineCommand(command) {
+    const response = await fetch("/api/command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ command }),
+    });
+    const result = await response.json();
+
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || `Command failed: ${command}`);
+    }
+
+    showToast(`${result.command} command queued`);
+  }
+
+  function activateTab(tabName) {
+    tabButtons.forEach((button) => {
+      const active = button.dataset.tabTarget === tabName;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+    });
+
+    tabPanels.forEach((panel) => {
+      const active = panel.dataset.tabPanel === tabName;
+      panel.classList.toggle("active", active);
+      panel.hidden = !active;
+    });
+
+    if (tabName === "arbitrage") {
+      if (chartRenderPending) {
+        renderChart();
+      } else if (chartInitialized) {
+        setTimeout(() => {
+          Plotly.Plots.resize(chart);
+          clampCurrentXRange();
+        }, 0);
       }
-    }, 250);
+    } else if (tabName === "logs") {
+      refreshLogs().catch((error) => showToast(error.message));
+    }
   }
 
   async function capture() {
@@ -985,34 +1370,54 @@
   }
 
   function bindControls() {
+    tabButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        activateTab(button.dataset.tabTarget);
+      });
+    });
     feeInput.addEventListener("input", () => {
       renderChart();
-      sendSettingsSoon();
     });
     staleInput.addEventListener("input", () => {
       renderChart();
-      sendSettingsSoon();
     });
     autoScaleInput.addEventListener("change", renderChart);
     showUnavailableInput.addEventListener("change", renderChart);
-    pauseButton.addEventListener("click", () => {
-      paused = !paused;
-      pauseButton.textContent = paused ? "Resume" : "Pause";
-
-      if (!paused && latestState) {
-        renderChart();
-      }
+    startButton.addEventListener("click", () => sendEngineCommand("Start").catch((error) => showToast(error.message)));
+    pauseButton.addEventListener("click", () => sendEngineCommand("Pause").catch((error) => showToast(error.message)));
+    stopButton.addEventListener("click", () => sendEngineCommand("Stop").catch((error) => showToast(error.message)));
+    refreshLogsButton.addEventListener("click", () => refreshLogs().catch((error) => showToast(error.message)));
+    exportDryRunJsonButton.addEventListener("click", () => exportDryRun("json").catch((error) => showToast(error.message)));
+    exportDryRunCsvButton.addEventListener("click", () => exportDryRun("csv").catch((error) => showToast(error.message)));
+    [logModeFilter, logTypeFilter, logStartAssetFilter].forEach((input) => {
+      input.addEventListener("change", () => refreshLogs().catch((error) => showToast(error.message)));
     });
-    resyncButton.addEventListener("click", fetchFullState);
-    captureButton.addEventListener("click", capture);
+    [logStrategyFilter, logCycleFilter].forEach((input) => {
+      input.addEventListener("input", () => {
+        clearTimeout(input.dataset.timerId);
+        const timerId = setTimeout(() => refreshLogs().catch((error) => showToast(error.message)), 250);
+        input.dataset.timerId = String(timerId);
+      });
+    });
     unpinButton.addEventListener("click", () => {
-      pinned = false;
       activeDetailCycleId = null;
-      detailBody.textContent = "Hover or click a point.";
+      detailBody.textContent = "Click a point.";
     });
     groupFilters.addEventListener("change", (event) => {
       const group = event.target.dataset.group;
       if (!group) return;
+      if (group === "ALL") {
+        ["KRW_START", "BTC_START", "USDT_START"].forEach((item) => {
+          if (event.target.checked) {
+            enabledGroups.add(item);
+          } else {
+            enabledGroups.delete(item);
+          }
+        });
+        renderGroupFilters();
+        renderChart();
+        return;
+      }
       if (event.target.checked) {
         enabledGroups.add(group);
       } else {
@@ -1035,6 +1440,8 @@
         liveSocket.send(JSON.stringify({
           type: "client-metrics",
           renderedFrames: Math.round(renderFramesPerSec),
+          renderMs: lastRenderDurationMs,
+          averageRenderMs: averageRenderMs(),
         }));
       }
     }

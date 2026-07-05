@@ -1,6 +1,7 @@
 const { pairKey } = require("./marketGraph");
 
 const HUB_RING = ["KRW", "BTC", "USDT"];
+const DEFAULT_START_ASSETS = ["KRW", "BTC", "USDT"];
 
 function hasEdge(graph, assetA, assetB) {
   return graph.has(assetA) && graph.get(assetA).has(assetB);
@@ -112,17 +113,44 @@ function routeSteps(route, triangle, pairMap) {
   return steps;
 }
 
+function rotateClosedRouteToStart(route, startAsset) {
+  const openRoute = route.slice(0, -1);
+  const startIndex = openRoute.indexOf(startAsset);
+
+  if (startIndex === -1) {
+    throw new Error(`Route ${route.join(" -> ")} does not contain start asset ${startAsset}`);
+  }
+
+  return [
+    ...openRoute.slice(startIndex),
+    ...openRoute.slice(0, startIndex),
+    startAsset,
+  ];
+}
+
+function enabledStartAssetsForTriangle(triangle, enabledStartAssets = DEFAULT_START_ASSETS) {
+  return enabledStartAssets
+    .filter((asset) => triangle.assets.includes(asset));
+}
+
 function buildCycleForRoute(triangle, route, direction, pairMap) {
   const steps = routeSteps(route, triangle, pairMap);
   const directionLabel = direction === "canonical" ? "정방향" : "역방향";
+  const startAsset = route[0];
+  const endAsset = route[route.length - 1];
+  const routeVariantId = `${triangle.id}:${direction}:${startAsset}`;
 
   // Reverse profitability must be calculated from the actual reverse route using live bid/ask orderbooks. It must not be inferred from 1 / canonicalMultiplier because bid/ask spread and fees break the reciprocal relationship.
   return {
-    id: `${triangle.id}:${direction}`,
+    id: routeVariantId,
     triangleId: triangle.id,
-    cycleId: `${triangle.id}:${direction}`,
+    legacyCycleId: `${triangle.id}:${direction}`,
+    cycleId: routeVariantId,
+    routeVariantId,
     direction,
     directionLabel,
+    startAsset,
+    endAsset,
     triangleAssets: triangle.assets,
     assets: triangle.assets,
     route,
@@ -145,13 +173,19 @@ function reverseRouteForCanonicalRoute(route) {
 }
 
 function buildDirectionalCyclesForTriangle(triangle, pairMap) {
+  return buildDirectionalCycleVariantsForTriangle(triangle, pairMap);
+}
+
+function buildDirectionalCycleVariantsForTriangle(triangle, pairMap, options = {}) {
   const canonicalRoute = canonicalRouteForTriangle(triangle);
   const reverseRoute = reverseRouteForCanonicalRoute(canonicalRoute);
+  const enabledStartAssets = options.enabledStartAssets || DEFAULT_START_ASSETS;
+  const startAssets = enabledStartAssetsForTriangle(triangle, enabledStartAssets);
 
-  return [
-    buildCycleForRoute(triangle, canonicalRoute, "canonical", pairMap),
-    buildCycleForRoute(triangle, reverseRoute, "reverse", pairMap),
-  ];
+  return startAssets.flatMap((startAsset) => [
+    buildCycleForRoute(triangle, rotateClosedRouteToStart(canonicalRoute, startAsset), "canonical", pairMap),
+    buildCycleForRoute(triangle, rotateClosedRouteToStart(reverseRoute, startAsset), "reverse", pairMap),
+  ]);
 }
 
 function buildCanonicalCycles(triangles, pairMap) {
@@ -160,11 +194,12 @@ function buildCanonicalCycles(triangles, pairMap) {
     .sort((left, right) => left.routeLabel.localeCompare(right.routeLabel));
 }
 
-function buildDirectionalCycles(triangles, pairMap) {
+function buildDirectionalCycles(triangles, pairMap, options = {}) {
   return triangles
-    .flatMap((triangle) => buildDirectionalCyclesForTriangle(triangle, pairMap))
+    .flatMap((triangle) => buildDirectionalCycleVariantsForTriangle(triangle, pairMap, options))
     .sort((left, right) => (
       left.triangleId.localeCompare(right.triangleId) ||
+      left.startAsset.localeCompare(right.startAsset) ||
       left.direction.localeCompare(right.direction)
     ));
 }
@@ -200,8 +235,11 @@ module.exports = {
   buildCanonicalCycle,
   buildCanonicalCycles,
   buildDirectionalCyclesForTriangle,
+  buildDirectionalCycleVariantsForTriangle,
   buildDirectionalCycles,
   getHubBreakdownCounts,
   canonicalRouteForTriangle,
   reverseRouteForCanonicalRoute,
+  rotateClosedRouteToStart,
+  enabledStartAssetsForTriangle,
 };

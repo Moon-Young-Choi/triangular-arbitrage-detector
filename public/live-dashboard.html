@@ -15,56 +15,151 @@
         <p id="connectionLine">Connecting...</p>
       </div>
       <div class="actions">
+        <button id="startButton" type="button">Start</button>
         <button id="pauseButton" type="button">Pause</button>
-        <button id="resyncButton" type="button">Resync</button>
-        <button id="captureButton" type="button">Capture</button>
+        <button id="stopButton" type="button">Stop</button>
       </div>
     </header>
 
-    <section id="summaryCards" class="summary-grid" aria-label="Summary"></section>
-    <section id="performanceCards" class="summary-grid performance-grid" aria-label="Performance and latency"></section>
+    <nav class="tabs" role="tablist" aria-label="Dashboard tabs">
+      <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="market">Market</button>
+      <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="strategy">Strategy</button>
+      <button class="tab-button active" type="button" role="tab" aria-selected="true" data-tab-target="arbitrage">Arbitrage Desk</button>
+      <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="execution">Execution</button>
+      <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="system">System</button>
+      <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="logs">Logs</button>
+      <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="settings">Settings</button>
+    </nav>
 
-    <section class="workspace">
-      <div class="chart-panel">
-        <div class="controls">
-          <label>
-            <span>Taker fee per leg</span>
-            <input id="feeInput" type="number" min="0" max="0.999999" step="0.0001" value="0">
-            <small>0.0005 = 0.05% per trade</small>
-          </label>
-          <label>
-            <span>Stale threshold ms</span>
-            <input id="staleInput" type="number" min="250" step="250" value="3000">
-          </label>
-          <label class="check-row">
-            <input id="autoScaleInput" type="checkbox" checked>
-            <span>Auto-scale y-axis</span>
-          </label>
-          <label class="check-row">
-            <input id="showUnavailableInput" type="checkbox">
-            <span>Show unavailable</span>
-          </label>
-        </div>
+    <section id="tab-market" class="tab-panel" role="tabpanel" data-tab-panel="market" hidden>
+      <section id="summaryCards" class="summary-grid" aria-label="Market summary"></section>
 
-        <div id="groupFilters" class="group-filters" aria-label="Group filters"></div>
+      <div class="panel-grid">
+        <section class="panel-block">
+          <div class="section-head">
+            <h2>Exchanges</h2>
+          </div>
+          <div id="exchangeCards" class="status-list"></div>
+        </section>
 
-        <div class="legend">
-          <span><i class="legend-dot green"></i>정방향 실제 수익 가능</span>
-          <span><i class="legend-dot pink diamond"></i>역방향 실제 수익 가능</span>
-          <span><i class="legend-dot neutral"></i>수수료 후 수익 아님</span>
-          <span><i class="legend-dot gray"></i>Unavailable or stale</span>
-        </div>
-
-        <div id="chart" class="chart"></div>
+        <section class="panel-block">
+          <div class="section-head">
+            <h2>Market Inputs</h2>
+          </div>
+          <div class="controls market-controls">
+            <label>
+              <span>Taker fee per leg</span>
+              <input id="feeInput" type="number" min="0" max="0.999999" step="0.0001" value="0">
+              <small>0.0005 = 0.05% per trade</small>
+            </label>
+            <label>
+              <span>Stale threshold ms</span>
+              <input id="staleInput" type="number" min="250" step="250" value="3000">
+            </label>
+          </div>
+          <div id="marketConfigCards" class="status-list"></div>
+        </section>
       </div>
+    </section>
 
-      <aside class="detail-panel">
-        <div class="detail-head">
-          <h2>Route detail</h2>
-          <button id="unpinButton" type="button">Unpin</button>
+    <section id="tab-strategy" class="tab-panel placeholder-panel" role="tabpanel" data-tab-panel="strategy" hidden>
+      <div id="strategyCards" class="status-list wide"></div>
+      <div id="strategyList" class="strategy-list"></div>
+    </section>
+
+    <section id="tab-arbitrage" class="tab-panel active" role="tabpanel" data-tab-panel="arbitrage">
+      <section class="workspace">
+        <div class="chart-panel">
+          <div class="controls">
+            <label class="check-row">
+              <input id="autoScaleInput" type="checkbox" checked>
+              <span>Auto-scale y-axis</span>
+            </label>
+            <label class="check-row">
+              <input id="showUnavailableInput" type="checkbox">
+              <span>Show unavailable</span>
+            </label>
+          </div>
+
+          <div id="groupFilters" class="group-filters" aria-label="Group filters"></div>
+
+          <div class="legend">
+            <span><i class="legend-dot pink"></i>Profitable</span>
+            <span><i class="legend-dot pink diamond"></i>Reverse direction</span>
+            <span><i class="legend-dot neutral"></i>Neutral</span>
+            <span><i class="legend-dot gray"></i>Unavailable or stale</span>
+          </div>
+
+          <div id="chart" class="chart"></div>
         </div>
-        <div id="detailBody" class="detail-body">Hover or click a point.</div>
-      </aside>
+
+        <aside class="detail-panel">
+          <div class="detail-head">
+            <h2>Route detail</h2>
+            <button id="unpinButton" type="button">Clear</button>
+          </div>
+          <div id="detailBody" class="detail-body">Click a point.</div>
+        </aside>
+      </section>
+    </section>
+
+    <section id="tab-execution" class="tab-panel placeholder-panel" role="tabpanel" data-tab-panel="execution" hidden>
+      <div id="executionCards" class="status-list wide"></div>
+      <div id="realRunTables" class="log-table"></div>
+    </section>
+
+    <section id="tab-system" class="tab-panel" role="tabpanel" data-tab-panel="system" hidden>
+      <section id="performanceCards" class="summary-grid performance-grid" aria-label="Performance and latency"></section>
+    </section>
+
+    <section id="tab-logs" class="tab-panel placeholder-panel" role="tabpanel" data-tab-panel="logs" hidden>
+      <div class="log-controls">
+        <label>
+          <span>Mode</span>
+          <select id="logModeFilter">
+            <option value="">All</option>
+            <option value="DRY_RUN">DRY_RUN</option>
+            <option value="REAL">REAL</option>
+          </select>
+        </label>
+        <label>
+          <span>Type</span>
+          <select id="logTypeFilter">
+            <option value="">All</option>
+            <option value="decision">decision</option>
+            <option value="rejection">rejection</option>
+            <option value="order">order</option>
+            <option value="fill">fill</option>
+            <option value="error">error</option>
+          </select>
+        </label>
+        <label>
+          <span>Start asset</span>
+          <select id="logStartAssetFilter">
+            <option value="">All</option>
+            <option value="KRW">KRW</option>
+            <option value="BTC">BTC</option>
+            <option value="USDT">USDT</option>
+          </select>
+        </label>
+        <label>
+          <span>Strategy</span>
+          <input id="logStrategyFilter" type="text" placeholder="strategyId">
+        </label>
+        <label>
+          <span>Cycle</span>
+          <input id="logCycleFilter" type="text" placeholder="cycleId">
+        </label>
+        <button id="refreshLogsButton" type="button">Refresh</button>
+        <button id="exportDryRunJsonButton" type="button">Export JSON</button>
+        <button id="exportDryRunCsvButton" type="button">Export CSV</button>
+      </div>
+      <section id="dryRunSummaryCards" class="summary-grid" aria-label="Dry-run summary"></section>
+      <div id="logTable" class="log-table"></div>
+    </section>
+
+    <section id="tab-settings" class="tab-panel placeholder-panel" role="tabpanel" data-tab-panel="settings" hidden>
+      <div id="settingsConfig" class="settings-config"></div>
     </section>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>

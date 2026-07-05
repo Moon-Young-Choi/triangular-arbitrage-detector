@@ -10,6 +10,8 @@ const {
 const { calculateCycleMultiplier } = require("../src/lib/multiplier");
 const { fetchUpbitMarkets, fetchOrderbooks } = require("../src/lib/upbitApi");
 const { writeReports } = require("../src/lib/report");
+const { loadRuntimeConfig } = require("../src/core/runtimeConfig");
+const { createStrategyRegistry } = require("../src/strategies/registry");
 
 function parseOptionalFeeRate(value) {
   if (value === undefined || value === "") {
@@ -105,6 +107,10 @@ function buildMultiplierRows(cycles, orderbookMap, feeInfo) {
       id: cycle.id,
       triangleId: cycle.triangleId,
       cycleId: cycle.cycleId,
+      legacyCycleId: cycle.legacyCycleId,
+      routeVariantId: cycle.routeVariantId,
+      startAsset: cycle.startAsset,
+      endAsset: cycle.endAsset,
       direction: cycle.direction,
       directionLabel: cycle.directionLabel,
       route: cycle.route,
@@ -137,6 +143,11 @@ function sortAvailableRows(rows, direction) {
 }
 
 async function main() {
+  const runtimeConfig = loadRuntimeConfig({
+    allowLiveTrading: process.env.Q_GAGARIN_ALLOW_LIVE_TRADING === "true",
+  });
+  const strategyRegistry = createStrategyRegistry();
+  const activeStrategy = strategyRegistry.get(runtimeConfig.activeStrategyId);
   const feeInfo = parseOptionalFeeRate(process.env.UPBIT_TAKER_FEE_RATE);
   const orderbookBatchSize = parsePositiveIntegerEnv("UPBIT_ORDERBOOK_BATCH_SIZE", 50);
   const orderbookDelayMs = parsePositiveIntegerEnv("UPBIT_ORDERBOOK_DELAY_MS", 200);
@@ -148,7 +159,9 @@ async function main() {
 
   console.log("Finding unique triangular routes...");
   const triangles = findUniqueTriangles(graph, pairMap);
-  const plottedCycles = buildDirectionalCycles(triangles, pairMap);
+  const plottedCycles = buildDirectionalCycles(triangles, pairMap, {
+    enabledStartAssets: runtimeConfig.enabledStartAssets,
+  });
   const hubBreakdown = getHubBreakdownCounts(triangles);
   const requiredMarkets = [...new Set(plottedCycles.flatMap((cycle) => cycle.markets))].sort();
 
@@ -161,13 +174,38 @@ async function main() {
     delayMs: orderbookDelayMs,
   });
 
-  const multiplierRows = buildMultiplierRows(plottedCycles, orderbookResult.orderbookMap, feeInfo);
+  const multiplierRows = buildMultiplierRows(plottedCycles, orderbookResult.orderbookMap, feeInfo)
+    .map((row) => {
+      const strategyDecision = activeStrategy.evaluate({
+        row: {
+          ...row,
+          status: row.available ? "available" : "unavailable",
+          netProfitRate: row.profitRate,
+        },
+      });
+
+      return {
+        ...row,
+        strategyId: strategyDecision.strategyId,
+        strategyAccepted: strategyDecision.accepted,
+        strategyReason: strategyDecision.reason,
+      };
+    });
   const unavailableCount = multiplierRows.filter((row) => !row.available).length;
-  const topRows = sortAvailableRows(multiplierRows, "desc").slice(0, 20);
+  const topRows = activeStrategy.rank(multiplierRows.filter((row) => row.available)).slice(0, 20);
   const bottomRows = sortAvailableRows(multiplierRows, "asc").slice(0, 20);
   const metadata = {
+    reportSchemaVersion: 2,
     generatedAt,
     source: "https://api.upbit.com/v1",
+    runtimeConfig,
+    activeStrategy: {
+      id: activeStrategy.id,
+      name: activeStrategy.name,
+      version: activeStrategy.version,
+      hash: activeStrategy.hash,
+      description: activeStrategy.description,
+    },
     totalMarketsLoaded: normalizedMarkets.length,
     quoteCounts: mapToSortedObject(quoteCounts),
     uniqueTriangleCount: triangles.length,

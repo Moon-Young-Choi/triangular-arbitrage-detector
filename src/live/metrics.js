@@ -74,9 +74,12 @@ class RuntimeMetrics {
     this.startedAtEpochMs = Date.now();
     this.counters = {
       upbitOrderbookMessages: 0,
+      observationOrderbookMessages: 0,
+      validationOrderbookMessages: 0,
       parsedMessages: 0,
       recalculatedCycles: 0,
       pushedPointUpdates: 0,
+      browserRenderedFrames: 0,
     };
     this.previousCounters = { ...this.counters };
     this.previousRateEpochMs = Date.now();
@@ -88,6 +91,9 @@ class RuntimeMetrics {
     this.latencySamples = [];
     this.maxLatencySamples = options.maxLatencySamples || 2000;
     this.latencyWindowMs = options.latencyWindowMs || 10000;
+    this.browserRenderSamples = [];
+    this.maxBrowserRenderSamples = options.maxBrowserRenderSamples || 240;
+    this.lastBrowserRenderMs = null;
   }
 
   increment(name, count = 1) {
@@ -108,6 +114,26 @@ class RuntimeMetrics {
 
     if (this.latencySamples.length > this.maxLatencySamples * 2) {
       this.latencySamples = this.latencySamples.slice(-this.maxLatencySamples);
+    }
+  }
+
+  recordBrowserRender(metrics = {}) {
+    const renderedFrames = Number(metrics.renderedFrames);
+    if (Number.isFinite(renderedFrames) && renderedFrames > 0) {
+      this.increment("browserRenderedFrames", renderedFrames);
+    }
+
+    const renderMs = Number.isFinite(Number(metrics.renderMs))
+      ? Number(metrics.renderMs)
+      : Number(metrics.lastRenderDurationMs);
+
+    if (Number.isFinite(renderMs) && renderMs >= 0) {
+      this.lastBrowserRenderMs = renderMs;
+      this.browserRenderSamples.push(renderMs);
+
+      if (this.browserRenderSamples.length > this.maxBrowserRenderSamples) {
+        this.browserRenderSamples = this.browserRenderSamples.slice(-this.maxBrowserRenderSamples);
+      }
     }
   }
 
@@ -174,6 +200,11 @@ class RuntimeMetrics {
       },
       rates: this.getRates(nowMs),
       latency: rollingStats(this.latencySamples, nowMs, this.latencyWindowMs, this.maxLatencySamples),
+      browser: {
+        renderSampleCount: this.browserRenderSamples.length,
+        lastRenderMs: this.lastBrowserRenderMs,
+        averageRenderMs: average(this.browserRenderSamples),
+      },
       counters: { ...this.counters },
       sampledAtEpochMs: nowMs,
     };

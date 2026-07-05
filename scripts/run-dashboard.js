@@ -1,25 +1,16 @@
 #!/usr/bin/env node
 
-const { startEngineRuntime } = require("../src/engine/engineRuntime");
 const { startDashboardServer } = require("../src/live/dashboardServer");
 
 async function main() {
-  const engine = await startEngineRuntime({
-    autoStart: process.env.ENGINE_AUTO_START !== "0",
-  });
-  const dashboard = await startDashboardServer({
-    snapshotPath: engine.snapshotPath,
-    logStore: engine.logStore,
-  });
+  const dashboard = await startDashboardServer();
 
-  console.log(`Live Upbit triangle dashboard: ${dashboard.url}`);
-  console.log(`Engine snapshot: ${engine.snapshotPath}`);
+  console.log(`q-gagarin dashboard: ${dashboard.url}`);
   console.log("Press Ctrl+C to stop.");
 
   const shutdown = async () => {
     try {
       await dashboard.close();
-      await engine.stop();
     } finally {
       process.exit(0);
     }

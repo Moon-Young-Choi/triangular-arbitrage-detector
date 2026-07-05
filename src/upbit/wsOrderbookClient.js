@@ -2,6 +2,7 @@ const EventEmitter = require("node:events");
 const crypto = require("node:crypto");
 const { performance } = require("node:perf_hooks");
 const WebSocket = require("ws");
+const { perfNowNs } = require("../core/timingTrace");
 
 const DEFAULT_ENDPOINT = "wss://api.upbit.com/websocket/v1";
 
@@ -16,11 +17,19 @@ function chunk(items, size) {
 }
 
 function normalizeOrderbookMessage(payload, receivedAt = Date.now(), timings = {}) {
+  const normalizeStartPerfNs = perfNowNs();
   const unit = payload && Array.isArray(payload.orderbook_units) && payload.orderbook_units[0];
 
   if (!payload || payload.type !== "orderbook" || !unit) {
     return null;
   }
+
+  const orderbookUnits = payload.orderbook_units.map((item) => ({
+    ask_price: Number(item.ask_price),
+    bid_price: Number(item.bid_price),
+    ask_size: Number(item.ask_size),
+    bid_size: Number(item.bid_size),
+  }));
 
   return {
     market: payload.code || payload.market,
@@ -30,9 +39,13 @@ function normalizeOrderbookMessage(payload, receivedAt = Date.now(), timings = {
     bidSize: Number(unit.bid_size),
     timestamp: Number(payload.timestamp),
     streamType: payload.stream_type || payload.streamType || "UNKNOWN",
+    orderbookUnit: orderbookUnits.length,
+    orderbook_units: orderbookUnits,
     receivedAt,
     timings: {
       ...timings,
+      normalizeStartPerfNs,
+      normalizeDonePerfNs: perfNowNs(),
       upbitTimestampMs: Number(payload.timestamp || payload.tms),
     },
   };
@@ -43,6 +56,7 @@ class UpbitWsOrderbookClient extends EventEmitter {
     super();
     this.endpoint = options.endpoint || DEFAULT_ENDPOINT;
     this.marketCodes = [...new Set(marketCodes)].sort();
+    this.orderbookUnit = options.orderbookUnit || 1;
     this.chunkSize = options.chunkSize || 100;
     this.connectionDelayMs = options.connectionDelayMs || 250;
     this.reconnectMinMs = options.reconnectMinMs || 1000;
@@ -104,7 +118,7 @@ class UpbitWsOrderbookClient extends EventEmitter {
     ws.on("open", () => {
       connection.status = "open";
       connection.reconnectAttempt = 0;
-      const codes = markets.map((market) => `${market}.1`);
+      const codes = markets.map((market) => `${market}.${this.orderbookUnit}`);
       const ticket = `q-gagarin-live-${index}-${crypto.randomUUID()}`;
 
       ws.send(
@@ -129,12 +143,19 @@ class UpbitWsOrderbookClient extends EventEmitter {
     ws.on("message", (data) => {
       const serverReceiveEpochMs = Date.now();
       const serverReceivePerfMs = performance.now();
+      const parseStartPerfNs = perfNowNs();
       connection.lastMessageAt = serverReceiveEpochMs;
 
       try {
         const payload = JSON.parse(data.toString("utf8"));
+        const parseDonePerfNs = perfNowNs();
         const parseDonePerfMs = performance.now();
         const orderbook = normalizeOrderbookMessage(payload, connection.lastMessageAt, {
+          exchangeTimestampEpochMs: Number(payload.timestamp || payload.tms),
+          socketReceiveEpochMs: serverReceiveEpochMs,
+          socketReceivePerfNs: perfNowNs(),
+          parseStartPerfNs,
+          parseDonePerfNs,
           serverReceiveEpochMs,
           serverReceivePerfMs,
           parseDonePerfMs,
@@ -198,6 +219,7 @@ class UpbitWsOrderbookClient extends EventEmitter {
 
     return {
       endpoint: this.endpoint,
+      orderbookUnit: this.orderbookUnit,
       marketCount: this.marketCodes.length,
       connectionCount: Math.ceil(this.marketCodes.length / this.chunkSize),
       openConnectionCount: connections.filter((connection) => connection.status === "open").length,

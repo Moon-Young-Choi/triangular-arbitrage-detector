@@ -1,10 +1,10 @@
-const GROUP_ORDER = ["KRW_BTC", "BTC_USDT", "USDT_KRW", "OTHER"];
+const GROUP_ORDER = ["KRW_START", "BTC_START", "USDT_START"];
 
 const GROUP_DEFINITIONS = {
-  KRW_BTC: { group: "KRW_BTC", groupLabel: "KRW -> BTC", groupIndex: 0 },
-  BTC_USDT: { group: "BTC_USDT", groupLabel: "BTC -> USDT", groupIndex: 1 },
-  USDT_KRW: { group: "USDT_KRW", groupLabel: "USDT -> KRW", groupIndex: 2 },
-  OTHER: { group: "OTHER", groupLabel: "Other", groupIndex: 3 },
+  KRW_START: { group: "KRW_START", groupLabel: "KRW Start", groupIndex: 0, startAsset: "KRW" },
+  BTC_START: { group: "BTC_START", groupLabel: "BTC Start", groupIndex: 1, startAsset: "BTC" },
+  USDT_START: { group: "USDT_START", groupLabel: "USDT Start", groupIndex: 2, startAsset: "USDT" },
+  ALL: { group: "ALL", groupLabel: "All", groupIndex: 3, startAsset: null },
 };
 
 function includesAll(assets, requiredAssets) {
@@ -41,25 +41,13 @@ function classifyOpportunity(grossMultiplier, feeRate = 0, status = "available",
 
 function assignCycleGroup(cycle) {
   const assets = [...cycle.triangleAssets].sort();
-  const allHub = includesAll(assets, ["KRW", "BTC", "USDT"]);
-  let definition = GROUP_DEFINITIONS.OTHER;
-  let thirdAsset = assets.join("/");
-
-  if (allHub || includesAll(assets, ["KRW", "BTC"])) {
-    definition = GROUP_DEFINITIONS.KRW_BTC;
-    thirdAsset = allHub ? "" : assets.find((asset) => !["KRW", "BTC"].includes(asset));
-  } else if (includesAll(assets, ["BTC", "USDT"])) {
-    definition = GROUP_DEFINITIONS.BTC_USDT;
-    thirdAsset = assets.find((asset) => !["BTC", "USDT"].includes(asset));
-  } else if (includesAll(assets, ["KRW", "USDT"])) {
-    definition = GROUP_DEFINITIONS.USDT_KRW;
-    thirdAsset = assets.find((asset) => !["KRW", "USDT"].includes(asset));
-  }
+  const startAsset = cycle.startAsset || (Array.isArray(cycle.route) ? cycle.route[0] : null);
+  const definition = GROUP_DEFINITIONS[`${startAsset}_START`] || GROUP_DEFINITIONS.ALL;
 
   return {
     ...definition,
-    allHub,
-    thirdAsset: thirdAsset || "",
+    allHub: includesAll(assets, ["KRW", "BTC", "USDT"]),
+    thirdAsset: assets.filter((asset) => !["KRW", "BTC", "USDT"].includes(asset)).join("/") || "",
   };
 }
 
@@ -68,12 +56,9 @@ function sortCycleForLayout(left, right) {
     return left.groupInfo.groupIndex - right.groupInfo.groupIndex;
   }
 
-  if (left.groupInfo.allHub !== right.groupInfo.allHub) {
-    return left.groupInfo.allHub ? -1 : 1;
-  }
-
   return (
     left.groupInfo.thirdAsset.localeCompare(right.groupInfo.thirdAsset) ||
+    String(left.startAsset || "").localeCompare(String(right.startAsset || "")) ||
     left.routeLabel.localeCompare(right.routeLabel) ||
     left.triangleId.localeCompare(right.triangleId)
   );
@@ -91,19 +76,22 @@ function buildStableCycleLayout(cycles) {
   const triangleBuckets = new Map();
 
   for (const cycle of decorated) {
-    if (!triangleBuckets.has(cycle.triangleId)) {
-      triangleBuckets.set(cycle.triangleId, []);
+    const routePairId = `${cycle.triangleId}:${cycle.startAsset || cycle.route[0]}`;
+
+    if (!triangleBuckets.has(routePairId)) {
+      triangleBuckets.set(routePairId, []);
     }
 
-    triangleBuckets.get(cycle.triangleId).push(cycle);
+    triangleBuckets.get(routePairId).push(cycle);
   }
 
   const trianglesForLayout = [...triangleBuckets.entries()]
-    .map(([triangleId, triangleCycles]) => {
+    .map(([routePairId, triangleCycles]) => {
       const canonical = triangleCycles.find((cycle) => cycle.direction === "canonical") || triangleCycles[0];
 
       return {
-        triangleId,
+        routePairId,
+        triangleId: canonical.triangleId,
         canonical,
         cycles: triangleCycles.sort((left, right) => {
           if (left.direction === right.direction) {
@@ -165,14 +153,24 @@ function buildStableCycleLayout(cycles) {
     });
   }
 
+  const allGroup = {
+    ...GROUP_DEFINITIONS.ALL,
+    count: trianglesForLayout.length,
+    pointCount: positionedCycles.length,
+    startX: null,
+    endX: null,
+    midX: null,
+    separatorX: null,
+  };
+
   const baseXs = positionedCycles.map((cycle) => cycle.baseX).filter((value) => Number.isFinite(value));
   const firstBaseX = baseXs.length > 0 ? Math.min(...baseXs) : 0;
   const lastBaseX = baseXs.length > 0 ? Math.max(...baseXs) : 1;
 
   return {
     cycles: positionedCycles,
-    groups,
-    groupCounts: Object.fromEntries(groups.map((group) => [group.group, group.count])),
+    groups: [...groups, allGroup],
+    groupCounts: Object.fromEntries([...groups, allGroup].map((group) => [group.group, group.count])),
     xRange: {
       min: firstBaseX - 0.75,
       max: lastBaseX + 0.75,

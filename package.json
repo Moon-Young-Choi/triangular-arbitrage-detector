@@ -9,6 +9,9 @@
     "ticker:ws": "node src/ws/ticker.js",
     "triangles": "node scripts/scan-triangles.js",
     "triangles:live": "node scripts/serve-triangles-live.js",
+    "engine": "node scripts/run-engine.js",
+    "dashboard": "node scripts/run-dashboard.js",
+    "baseline": "node scripts/benchmark-live-baseline.js",
     "check": "find src scripts public test -name '*.js' -print0 | xargs -0 -n1 node --check",
     "test": "npm run check && node --test"
   },

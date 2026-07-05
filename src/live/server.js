@@ -5,6 +5,7 @@ const { URL } = require("node:url");
 const WebSocket = require("ws");
 const { LiveTriangleState, parseFeeRate } = require("./liveState");
 const { formatLocalTimestampForFilename } = require("./liveUtils");
+const { loadRuntimeConfig } = require("../core/runtimeConfig");
 const { UpbitWsOrderbookClient } = require("../upbit/wsOrderbookClient");
 
 function contentTypeFor(filePath) {
@@ -164,6 +165,18 @@ function createRequestHandler(options) {
         return;
       }
 
+      if (req.method === "POST" && requestUrl.pathname === "/api/strategy") {
+        const payload = await readJsonBody(req);
+
+        if (typeof state.selectStrategy !== "function") {
+          throw new Error("Strategy selection is not available");
+        }
+
+        state.selectStrategy(payload.strategyId);
+        sendJson(res, 200, state.getSnapshot());
+        return;
+      }
+
       if (req.method === "GET" && requestUrl.pathname === "/api/events") {
         res.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
@@ -244,7 +257,7 @@ function clampInterval(value, defaultValue) {
 async function startLiveServer(options = {}) {
   const port = options.port !== undefined ? options.port : Number.parseInt(process.env.PORT || "3099", 10);
   const host = options.host || "127.0.0.1";
-  const uiPushIntervalMs = clampInterval(options.uiPushIntervalMs || process.env.UI_PUSH_INTERVAL_MS, 50);
+  const uiPushIntervalMs = clampInterval(options.uiPushIntervalMs || process.env.UI_PUSH_INTERVAL_MS, 250);
   const ssePushIntervalMs = options.ssePushIntervalMs ||
     Number.parseInt(process.env.SSE_PUSH_INTERVAL_MS || "1000", 10);
   const staleOrderbookMs = options.staleOrderbookMs ||
@@ -252,10 +265,19 @@ async function startLiveServer(options = {}) {
   const orderbookBatchSize = Number.parseInt(process.env.UPBIT_ORDERBOOK_BATCH_SIZE || "50", 10);
   const orderbookDelayMs = Number.parseInt(process.env.UPBIT_ORDERBOOK_DELAY_MS || "200", 10);
   const wsMarketsPerConnection = Number.parseInt(process.env.UPBIT_WS_MARKETS_PER_CONNECTION || "100", 10);
+  const runtimeConfig = options.runtimeConfig || loadRuntimeConfig({
+    configPath: options.runtimeConfigPath,
+    allowLiveTrading: process.env.Q_GAGARIN_ALLOW_LIVE_TRADING === "true",
+  });
   const state = options.state || new LiveTriangleState({
     feeRate: parseFeeRate(process.env.UPBIT_TAKER_FEE_RATE, 0),
     staleOrderbookMs,
+    runtimeConfig,
   });
+
+  if (options.state && typeof state.setRuntimeConfig === "function" && !state.runtimeConfig) {
+    state.setRuntimeConfig(runtimeConfig);
+  }
 
   if (!options.skipInitialize) {
     await state.initialize();
@@ -281,6 +303,7 @@ async function startLiveServer(options = {}) {
       type: "hello",
       sentAtEpochMs: Date.now(),
       uiPushIntervalMs,
+      runtimeConfig,
     }));
     socket.send(JSON.stringify(state.getSnapshot()));
 
@@ -288,8 +311,12 @@ async function startLiveServer(options = {}) {
       try {
         const message = JSON.parse(data.toString("utf8"));
 
-        if (message.type === "client-metrics" && message.renderedFrames) {
-          state.metrics.increment("browserRenderedFrames", Number(message.renderedFrames) || 0);
+        if (message.type === "client-metrics" && state.metrics) {
+          if (typeof state.metrics.recordBrowserRender === "function") {
+            state.metrics.recordBrowserRender(message);
+          } else if (message.renderedFrames && typeof state.metrics.increment === "function") {
+            state.metrics.increment("browserRenderedFrames", Number(message.renderedFrames) || 0);
+          }
         }
       } catch (_error) {
         socket.send(JSON.stringify({
@@ -319,16 +346,22 @@ async function startLiveServer(options = {}) {
 
   const wsClient = options.wsClient || new UpbitWsOrderbookClient(state.requiredMarkets || [], {
     chunkSize: wsMarketsPerConnection,
+    orderbookUnit: runtimeConfig.observationOrderbookUnit,
+  });
+  const validationWsClient = options.validationWsClient || new UpbitWsOrderbookClient(state.requiredMarkets || [], {
+    chunkSize: wsMarketsPerConnection,
+    orderbookUnit: runtimeConfig.validationOrderbookUnit,
   });
 
   wsClient.on("orderbook", (orderbook) => {
-    state.updateOrderbook(orderbook);
+    state.updateObservationOrderbook(orderbook);
   });
   wsClient.on("status", (status) => {
-    state.setWsStatus(status);
+    state.setWsStatus(status, "observation");
     sendSse(sseClients, "status", status);
     sendWs(liveWsClients, {
       type: "status",
+      feedName: "observation",
       sentAtEpochMs: Date.now(),
       status,
     });
@@ -337,6 +370,32 @@ async function startLiveServer(options = {}) {
     sendSse(sseClients, "error", error);
     sendWs(liveWsClients, {
       type: "error",
+      sentAtEpochMs: Date.now(),
+      error,
+    });
+  });
+  validationWsClient.on("orderbook", (orderbook) => {
+    if (typeof state.updateValidationOrderbook === "function") {
+      state.updateValidationOrderbook(orderbook);
+    }
+  });
+  validationWsClient.on("status", (status) => {
+    if (typeof state.setWsStatus === "function") {
+      state.setWsStatus(status, "validation");
+    }
+    sendSse(sseClients, "validation-status", status);
+    sendWs(liveWsClients, {
+      type: "status",
+      feedName: "validation",
+      sentAtEpochMs: Date.now(),
+      status,
+    });
+  });
+  validationWsClient.on("error", (error) => {
+    sendSse(sseClients, "error", error);
+    sendWs(liveWsClients, {
+      type: "error",
+      feedName: "validation",
       sentAtEpochMs: Date.now(),
       error,
     });
@@ -391,7 +450,9 @@ async function startLiveServer(options = {}) {
   });
 
   if (!options.skipFeeds) {
+    state.engineState = "RUNNING";
     wsClient.start();
+    validationWsClient.start();
   }
   startTimers();
 
@@ -399,12 +460,19 @@ async function startLiveServer(options = {}) {
     server,
     state,
     wsClient,
+    validationWsClient,
     url: `http://${host}:${server.address().port}`,
+    uiPushIntervalMs,
+    runtimeConfig,
     close: async () => {
       if (deltaTimer) clearInterval(deltaTimer);
       if (sseTimer) clearInterval(sseTimer);
       if (fallbackTimer) clearInterval(fallbackTimer);
       wsClient.stop();
+      validationWsClient.stop();
+      if (state.engineState === "RUNNING") {
+        state.engineState = "STOPPED";
+      }
       for (const client of sseClients) {
         client.end();
       }

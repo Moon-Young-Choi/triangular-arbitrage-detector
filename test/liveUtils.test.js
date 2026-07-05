@@ -16,11 +16,15 @@ const {
   calculateProcessCpuPercent,
 } = require("../src/live/metrics");
 
-function cycle(id, assets, routeLabel = `${id} route`) {
+function cycle(id, assets, routeLabel = `${id} route`, startAsset = assets[0]) {
   return {
     id,
     triangleAssets: assets,
+    startAsset,
+    endAsset: startAsset,
+    cycleId: `${id}:${startAsset}`,
     routeLabel,
+    route: [startAsset, ...assets.filter((asset) => asset !== startAsset), startAsset],
     markets: assets.map((asset, index) => `${asset}-${assets[(index + 1) % assets.length]}`),
   };
 }
@@ -56,26 +60,26 @@ test("point classification uses only the actual direction multiplier", () => {
   assert.equal(classifyOpportunity(1.2, 0.0005, "stale"), "unavailable");
 });
 
-test("group assignment follows canonical hub edges", () => {
-  assert.deepEqual(assignCycleGroup(cycle("a", ["KRW", "BTC", "ETH"])).group, "KRW_BTC");
-  assert.deepEqual(assignCycleGroup(cycle("b", ["BTC", "USDT", "ETH"])).group, "BTC_USDT");
-  assert.deepEqual(assignCycleGroup(cycle("c", ["KRW", "USDT", "ETH"])).group, "USDT_KRW");
+test("group assignment follows executable start assets", () => {
+  assert.deepEqual(assignCycleGroup(cycle("a", ["KRW", "BTC", "ETH"], "a route", "KRW")).group, "KRW_START");
+  assert.deepEqual(assignCycleGroup(cycle("b", ["BTC", "USDT", "ETH"], "b route", "BTC")).group, "BTC_START");
+  assert.deepEqual(assignCycleGroup(cycle("c", ["KRW", "USDT", "ETH"], "c route", "USDT")).group, "USDT_START");
 
-  const allHub = assignCycleGroup(cycle("d", ["KRW", "BTC", "USDT"]));
-  assert.equal(allHub.group, "KRW_BTC");
+  const allHub = assignCycleGroup(cycle("d", ["KRW", "BTC", "USDT"], "d route", "KRW"));
+  assert.equal(allHub.group, "KRW_START");
   assert.equal(allHub.allHub, true);
 
-  assert.equal(assignCycleGroup(cycle("e", ["ETH", "XRP", "SOL"])).group, "OTHER");
+  assert.equal(assignCycleGroup(cycle("e", ["ETH", "XRP", "SOL"], "e route", "ETH")).group, "ALL");
 });
 
 test("stable x-position generation is deterministic and ignores multipliers", () => {
   const cycles = [
-    { ...cycle("eth:canonical", ["KRW", "BTC", "ETH"]), triangleId: "eth", direction: "canonical", grossMultiplier: 1.1 },
-    { ...cycle("eth:reverse", ["KRW", "BTC", "ETH"]), triangleId: "eth", direction: "reverse", grossMultiplier: 0.8 },
-    { ...cycle("xrp:canonical", ["KRW", "BTC", "XRP"]), triangleId: "xrp", direction: "canonical", grossMultiplier: 0.9 },
-    { ...cycle("xrp:reverse", ["KRW", "BTC", "XRP"]), triangleId: "xrp", direction: "reverse", grossMultiplier: 1.0 },
-    { ...cycle("hub:canonical", ["KRW", "BTC", "USDT"]), triangleId: "hub", direction: "canonical", grossMultiplier: 1 },
-    { ...cycle("hub:reverse", ["KRW", "BTC", "USDT"]), triangleId: "hub", direction: "reverse", grossMultiplier: 1 },
+    { ...cycle("eth:canonical:KRW", ["KRW", "BTC", "ETH"], "eth KRW canonical", "KRW"), triangleId: "eth", direction: "canonical", grossMultiplier: 1.1 },
+    { ...cycle("eth:reverse:KRW", ["KRW", "BTC", "ETH"], "eth KRW reverse", "KRW"), triangleId: "eth", direction: "reverse", grossMultiplier: 0.8 },
+    { ...cycle("eth:canonical:BTC", ["KRW", "BTC", "ETH"], "eth BTC canonical", "BTC"), triangleId: "eth", direction: "canonical", grossMultiplier: 1.1 },
+    { ...cycle("eth:reverse:BTC", ["KRW", "BTC", "ETH"], "eth BTC reverse", "BTC"), triangleId: "eth", direction: "reverse", grossMultiplier: 0.8 },
+    { ...cycle("hub:canonical:USDT", ["KRW", "BTC", "USDT"], "hub USDT canonical", "USDT"), triangleId: "hub", direction: "canonical", grossMultiplier: 1 },
+    { ...cycle("hub:reverse:USDT", ["KRW", "BTC", "USDT"], "hub USDT reverse", "USDT"), triangleId: "hub", direction: "reverse", grossMultiplier: 1 },
   ];
   const firstLayout = buildStableCycleLayout(cycles);
   const first = firstLayout.cycles.map(({ id, baseX, x }) => ({ id, baseX, x }));
@@ -85,16 +89,18 @@ test("stable x-position generation is deterministic and ignores multipliers", ()
 
   assert.deepEqual(first, second);
   assert.deepEqual(first, [
-    { id: "hub:canonical", baseX: 1, x: 0.85 },
-    { id: "hub:reverse", baseX: 1, x: 1.15 },
-    { id: "eth:canonical", baseX: 2, x: 1.85 },
-    { id: "eth:reverse", baseX: 2, x: 2.15 },
-    { id: "xrp:canonical", baseX: 3, x: 2.85 },
-    { id: "xrp:reverse", baseX: 3, x: 3.15 },
+    { id: "eth:canonical:KRW", baseX: 1, x: 0.85 },
+    { id: "eth:reverse:KRW", baseX: 1, x: 1.15 },
+    { id: "eth:canonical:BTC", baseX: 2, x: 1.85 },
+    { id: "eth:reverse:BTC", baseX: 2, x: 2.15 },
+    { id: "hub:canonical:USDT", baseX: 3, x: 2.85 },
+    { id: "hub:reverse:USDT", baseX: 3, x: 3.15 },
   ]);
   assert.deepEqual(firstLayout.xRange, { min: 0.25, max: 3.75 });
-  assert.equal(firstLayout.groups.find((group) => group.group === "KRW_BTC").count, 3);
-  assert.equal(firstLayout.groups.find((group) => group.group === "KRW_BTC").pointCount, 6);
+  assert.equal(firstLayout.groups.find((group) => group.group === "KRW_START").count, 1);
+  assert.equal(firstLayout.groups.find((group) => group.group === "BTC_START").count, 1);
+  assert.equal(firstLayout.groups.find((group) => group.group === "USDT_START").count, 1);
+  assert.equal(firstLayout.groups.find((group) => group.group === "ALL").pointCount, 6);
 });
 
 test("capture timestamp filename format includes YYYYMMDD-HHmmss", () => {
