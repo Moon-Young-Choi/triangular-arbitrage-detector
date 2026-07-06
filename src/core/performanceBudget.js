@@ -1,7 +1,7 @@
 const { diffNsToMs } = require("./timingTrace");
 
 const TRADING_LATENCY_DOMAINS = Object.freeze(["marketData", "decision", "execution"]);
-const DASHBOARD_LATENCY_DOMAIN = "dashboard";
+const DISPLAY_LATENCY_DOMAIN = "display";
 
 function numberOrNull(value) {
   const parsed = Number(value);
@@ -85,17 +85,17 @@ function summarizeLatency({ trace = {}, latency = {}, execution = {} } = {}) {
       privateWsFillMs: metric(privateWsFillMs),
       source: execution.source || null,
     },
-    dashboard: {
+    display: {
       serverToClientMs: metric(latency.serverToClientMs),
       clientRenderMs: metric(latency.clientRenderMs),
-      browserApplyToRenderMs: metric(trace.browserApplyToRenderMs),
-      dashboardReceiveLagMs: metric(latency.dashboardReceiveLagMs ?? trace.dashboardReceiveLagMs, {
+      operatorApplyToRenderMs: metric(trace.operatorApplyToRenderMs),
+      receiveLagMs: metric(latency.displayReceiveLagMs ?? trace.displayReceiveLagMs, {
         clockSkewSensitive: true,
-        source: "server/browser clocks",
+        source: "server/operator-display clocks",
       }),
       estimatedEndToDisplayMs: metric(latency.estimatedEndToDisplayMs, {
         clockSkewSensitive: true,
-        source: "exchange/server/browser clocks",
+        source: "exchange/server/operator-display clocks",
       }),
     },
   };
@@ -106,7 +106,7 @@ function normalizeLatencySummary(sample = {}) {
     return summarizeLatency(sample);
   }
 
-  if (sample.marketData || sample.decision || sample.execution || sample.dashboard) {
+  if (sample.marketData || sample.decision || sample.execution || sample.display) {
     return sample;
   }
 
@@ -119,7 +119,7 @@ function summarizeLatencyPercentiles(samples = []) {
     marketData: {},
     decision: {},
     execution: {},
-    dashboard: {},
+    display: {},
   };
 
   for (const domain of Object.keys(domains)) {
@@ -145,7 +145,7 @@ function summarizeLatencyPercentiles(samples = []) {
       domains[domain][name] = {
         ...metricDistribution(values),
         clockSkewSensitive,
-        tradingDecisionInput: domain !== DASHBOARD_LATENCY_DOMAIN,
+        tradingDecisionInput: domain !== DISPLAY_LATENCY_DOMAIN,
         sources,
       };
     }
@@ -154,7 +154,7 @@ function summarizeLatencyPercentiles(samples = []) {
   return {
     ...domains,
     tradingLatencyDomains: TRADING_LATENCY_DOMAINS.slice(),
-    dashboardLatencyAffectsTrading: false,
+    displayLatencyAffectsTrading: false,
   };
 }
 
@@ -266,8 +266,8 @@ function evaluateTradingLatencyBudget(input = {}, budget = {}) {
   if (checks.length > 0) {
     return {
       ...checks[0],
-      dashboardLatencyAffectsTrading: false,
-      ignoredDomains: [DASHBOARD_LATENCY_DOMAIN],
+      displayLatencyAffectsTrading: false,
+      ignoredDomains: [DISPLAY_LATENCY_DOMAIN],
     };
   }
 
@@ -275,8 +275,8 @@ function evaluateTradingLatencyBudget(input = {}, budget = {}) {
     ok: true,
     rejectionReason: null,
     emergencyStop: false,
-    dashboardLatencyAffectsTrading: false,
-    ignoredDomains: [DASHBOARD_LATENCY_DOMAIN],
+    displayLatencyAffectsTrading: false,
+    ignoredDomains: [DISPLAY_LATENCY_DOMAIN],
   };
 }
 
@@ -286,5 +286,5 @@ module.exports = {
   summarizeLatency,
   summarizeLatencyPercentiles,
   TRADING_LATENCY_DOMAINS,
-  DASHBOARD_LATENCY_DOMAIN,
+  DISPLAY_LATENCY_DOMAIN,
 };

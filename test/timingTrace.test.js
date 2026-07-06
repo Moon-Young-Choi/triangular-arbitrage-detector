@@ -19,7 +19,7 @@ test("timing trace records perf and cross-clock latency breakdowns", () => {
     clockSkewSensitive: ["exchangeTimestampEpochMs", "socketReceiveEpochMs"],
   });
 
-  trace.markEpoch("dashboardReceiveEpochMs", 1020, { clockSkewSensitive: true });
+  trace.markEpoch("displayReceiveEpochMs", 1020, { clockSkewSensitive: true });
   trace.merge({ telemetryPublishEpochMs: 1018 });
 
   assert.equal(diffNsToMs("2500000", "1000000"), 1.5);
@@ -30,5 +30,5 @@ test("timing trace records perf and cross-clock latency breakdowns", () => {
   assert.equal(trace.breakdown().orderQueryMs, 4);
   assert.equal(trace.breakdown().privateWsFillMs, 6);
   assert.equal(trace.breakdown().exchangeToSocketMs, 12);
-  assert.equal(trace.serialize().clockSkewSensitive.includes("dashboardReceiveEpochMs"), true);
+  assert.equal(trace.serialize().clockSkewSensitive.includes("displayReceiveEpochMs"), true);
 });

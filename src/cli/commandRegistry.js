@@ -232,7 +232,7 @@ function renderSystem(snapshot = {}) {
       ["Decision max age", budget.decision && budget.decision.maxDecisionAgeMs],
       ["Execution max ack", budget.execution && budget.execution.maxOrderAckMs],
       ["Execution max reconciliation", budget.execution && budget.execution.maxReconciliationMs],
-      ["Dashboard latency affects trading", budget.dashboardLatencyAffectsTrading === true],
+      ["Display latency affects trading", budget.displayLatencyAffectsTrading === true],
     ]),
   ].join("\n");
 }
@@ -360,7 +360,7 @@ function renderBalances(snapshot = {}) {
 
 function renderLatency(snapshot = {}) {
   const budget = snapshot.performanceBudget || {};
-  const metrics = snapshot.metrics || {};
+  const metrics = sanitizeLegacyBrowserMetrics(snapshot.metrics || {});
   const rows = [
     ["market-data", "maxOldestLegAgeMs", budget.marketData && budget.marketData.maxOldestLegAgeMs],
     ["market-data", "maxLegTimestampSkewMs", budget.marketData && budget.marketData.maxLegTimestampSkewMs],
@@ -368,7 +368,7 @@ function renderLatency(snapshot = {}) {
     ["decision", "maxDecisionAgeMs", budget.decision && budget.decision.maxDecisionAgeMs],
     ["execution", "maxOrderAckMs", budget.execution && budget.execution.maxOrderAckMs],
     ["execution", "maxReconciliationMs", budget.execution && budget.execution.maxReconciliationMs],
-    ["dashboard", "affectsTrading", budget.dashboardLatencyAffectsTrading === true],
+    ["display", "affectsTrading", budget.displayLatencyAffectsTrading === true],
   ];
 
   return [
@@ -376,6 +376,23 @@ function renderLatency(snapshot = {}) {
     renderTable(["Domain", "Metric", "Value"], rows),
     Object.keys(metrics).length > 0 ? JSON.stringify(metrics, null, 2) : "",
   ].filter(Boolean).join("\n");
+}
+
+function sanitizeLegacyBrowserMetrics(metrics = {}) {
+  const sanitized = { ...metrics };
+  delete sanitized.browser;
+
+  if (sanitized.rates) {
+    sanitized.rates = { ...sanitized.rates };
+    delete sanitized.rates.browserRenderedFramesPerSec;
+  }
+
+  if (sanitized.counters) {
+    sanitized.counters = { ...sanitized.counters };
+    delete sanitized.counters.browserRenderedFrames;
+  }
+
+  return sanitized;
 }
 
 function jsonForDisplay(value) {

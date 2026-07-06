@@ -11,7 +11,7 @@ const {
 const {
   dryRunReportCsv,
   summarizeDryRun,
-} = require("../src/dashboard/dryRunReport");
+} = require("../src/ops/dryRunReport");
 
 test("log read model filters dry-run logs and summarizes report metrics", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-logread-"));

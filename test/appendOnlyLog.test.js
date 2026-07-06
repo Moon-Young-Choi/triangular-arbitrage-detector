@@ -92,13 +92,13 @@ test("audit records expose canonical schema completeness without dropping payloa
     },
   });
   await store.append("commands", {
-    type: "dashboard.command",
+    type: "cli.command",
     mode: "DRY_RUN",
     engineState: "STOPPED",
     commandId: "command-1",
     command: "Start",
     runMode: "DRY_RUN",
-    source: "dashboard",
+    source: "cli",
   });
   await store.append("events", {
     type: "risk.rejected",

@@ -11,12 +11,12 @@ const { CommandStatusStore } = require("../src/core/commandStatusStore");
 const { FillTracker } = require("../src/execution/fillTracker");
 const { BalanceTracker } = require("../src/execution/balanceTracker");
 
-test("engine runtime performance budget separates trading and dashboard latency domains", () => {
+test("engine runtime performance budget separates trading and display latency domains", () => {
   const snapshot = buildPerformanceBudgetSnapshot(DEFAULT_RUNTIME_CONFIG);
 
   assert.deepEqual(snapshot.tradingLatencyDomains, ["marketData", "decision", "execution"]);
-  assert.deepEqual(snapshot.ignoredLatencyDomains, ["dashboard"]);
-  assert.equal(snapshot.dashboardLatencyAffectsTrading, false);
+  assert.deepEqual(snapshot.ignoredLatencyDomains, ["display"]);
+  assert.equal(snapshot.displayLatencyAffectsTrading, false);
   assert.equal(
     snapshot.decision.maxDecisionAgeMs,
     DEFAULT_RUNTIME_CONFIG.executionPolicy.marketDataGuards.maxDecisionAgeMs,
@@ -225,12 +225,12 @@ test("engine runtime skips commands created before process start", async () => {
   const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
   await logStore.ensureFiles();
   const oldCommand = await logStore.append("commands", {
-    type: "dashboard.command",
+    type: "cli.command",
     mode: "DRY_RUN",
     engineState: "STOPPED",
     command: "Start",
     commandId: "11111111-1111-4111-8111-111111111111",
-    source: "dashboard",
+    source: "cli",
   });
   const observationClient = fakeWsClient();
   const runtime = new EngineRuntime({
@@ -257,13 +257,13 @@ test("engine runtime accepts fresh mode-aware commands and writes delta/status",
   const commandStatusStore = new CommandStatusStore({ runtimeDir: dir });
   await logStore.ensureFiles();
   await logStore.append("commands", {
-    type: "dashboard.command",
+    type: "cli.command",
     mode: "DRY_RUN",
     engineState: "STOPPED",
     command: "Start",
     commandId: "22222222-2222-4222-8222-222222222222",
     runMode: "DRY_RUN",
-    source: "dashboard",
+    source: "cli",
   });
   const observationClient = fakeWsClient();
   const runtime = new EngineRuntime({
@@ -339,19 +339,19 @@ test("engine runtime processes atomic command inbox files once", async () => {
   assert.equal(pending.length, 0);
 });
 
-test("engine runtime rejects unsafe queued dashboard command metadata", async () => {
+test("engine runtime rejects unsafe queued operator command metadata", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-command-policy-"));
   const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
   const commandStatusStore = new CommandStatusStore({ runtimeDir: dir });
   await logStore.ensureFiles();
   await logStore.append("commands", {
-    type: "dashboard.command",
+    type: "cli.command",
     mode: "DRY_RUN",
     engineState: "STOPPED",
     command: "Pause",
     commandId: "33333333-3333-4333-8333-333333333333",
     runMode: "DRY_RUN",
-    source: "dashboard",
+    source: "cli",
   });
   const observationClient = fakeWsClient();
   const runtime = new EngineRuntime({

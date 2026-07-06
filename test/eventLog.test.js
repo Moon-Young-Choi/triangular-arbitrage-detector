@@ -23,13 +23,13 @@ test("event log appends audit records and publishes committed events", async () 
   });
 
   const record = await eventLog.append("commands", {
-    type: "dashboard.command",
+    type: "cli.command",
     mode: "DRY_RUN",
     engineState: "STOPPED",
     commandId: "command-event-log",
     command: "Start",
     runMode: "DRY_RUN",
-    source: "dashboard",
+    source: "cli",
   });
   const rows = await eventLog.readAll("commands");
 

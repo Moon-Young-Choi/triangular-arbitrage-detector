@@ -66,14 +66,14 @@ class TimingTrace {
       orderReconciliationMs: diffNsToMs(p.reconciliationDonePerfNs, p.reconciliationStartedPerfNs),
       orderQueryMs: diffNsToMs(p.orderQueryDonePerfNs, p.reconciliationStartedPerfNs),
       privateWsFillMs: diffNsToMs(p.privateWsFillReceivePerfNs, p.orderSubmitStartPerfNs),
-      browserApplyToRenderMs: p.browserRenderDonePerfMs !== undefined && p.browserApplyStartPerfMs !== undefined
-        ? p.browserRenderDonePerfMs - p.browserApplyStartPerfMs
+      operatorApplyToRenderMs: p.operatorRenderDonePerfMs !== undefined && p.operatorApplyStartPerfMs !== undefined
+        ? p.operatorRenderDonePerfMs - p.operatorApplyStartPerfMs
         : null,
       exchangeToSocketMs: p.socketReceiveEpochMs !== undefined && p.exchangeTimestampEpochMs !== undefined
         ? p.socketReceiveEpochMs - p.exchangeTimestampEpochMs
         : null,
-      dashboardReceiveLagMs: p.dashboardReceiveEpochMs !== undefined && p.telemetryPublishEpochMs !== undefined
-        ? p.dashboardReceiveEpochMs - p.telemetryPublishEpochMs
+      displayReceiveLagMs: p.displayReceiveEpochMs !== undefined && p.telemetryPublishEpochMs !== undefined
+        ? p.displayReceiveEpochMs - p.telemetryPublishEpochMs
         : null,
       clockSkewSensitive: [...this.clockSkewSensitive],
     };

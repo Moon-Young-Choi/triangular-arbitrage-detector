@@ -105,9 +105,9 @@ npm run cli -- /dryrun report --format csv
 
 CLI commands read `out/runtime/latest-snapshot.json`, `out/runtime/latest-delta.json`, and `out/logs/*.ndjson` directly. Start/Pause/Stop/Emergency Stop commands are written atomically under `out/runtime/commands/inbox/`; the engine processes each command once, moves it to `out/runtime/commands/processed/`, writes status under `out/runtime/command-status/`, and keeps `out/logs/commands.ndjson` as an audit log.
 
-## Browser Migration Note
+## Browser Removal
 
-Browser operation is deprecated. `npm run dashboard` and `npm run triangles:live` intentionally print a migration notice and exit; use `npm run engine` plus `npm run cli` instead. Historical browser assets remain only as compatibility artifacts while the CLI replacement is finalized.
+Browser operation has been removed. `npm run dashboard` and `npm run triangles:live` intentionally print a migration notice and exit; use `npm run engine` plus `npm run cli` instead. There is no HTTP/WebSocket/SSE/static asset path for operations.
 
 The engine owns exchange connections, orderbook stores, strategy evaluation, dry-run/real execution, private fill tracking, snapshots, deltas, and append-only logs. CLI clients read the engine's runtime files directly and queue Observe, Dry Run, Real Guarded, Pause, Stop, and Emergency Stop commands through the atomic command inbox. Each queued command gets a command status record under `out/runtime/command-status/` so CLI clients can show whether the engine accepted or rejected it.
 

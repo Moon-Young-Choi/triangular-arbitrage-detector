@@ -996,7 +996,7 @@ class LiveTriangleState {
       riskDonePerfNs,
       telemetryPublishPerfNs: perfNowNs(),
       telemetryPublishEpochMs: Date.now(),
-      clockSkewSensitive: ["exchangeTimestampEpochMs", "socketReceiveEpochMs", "dashboardReceiveEpochMs"],
+      clockSkewSensitive: ["exchangeTimestampEpochMs", "socketReceiveEpochMs", "displayReceiveEpochMs"],
     });
 
     row.strategyId = strategyDecision.strategyId;

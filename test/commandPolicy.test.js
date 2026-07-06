@@ -1,51 +1,51 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  normalizeDashboardCommandPayload,
+  normalizeOperatorCommandPayload,
   normalizeQueuedCommandRecord,
 } = require("../src/core/commandPolicy");
 
-test("dashboard command policy accepts only Start/Pause/Stop command payloads", () => {
+test("operator command policy accepts only Start/Pause/Stop command payloads", () => {
   assert.deepEqual(
-    normalizeDashboardCommandPayload({ command: "Start", runMode: "dry_run" }),
+    normalizeOperatorCommandPayload({ command: "Start", runMode: "dry_run" }),
     { command: "Start", runMode: "DRY_RUN" },
   );
   assert.deepEqual(
-    normalizeDashboardCommandPayload({ command: "Stop", emergency: true }),
+    normalizeOperatorCommandPayload({ command: "Stop", emergency: true }),
     { command: "Stop", emergency: true },
   );
 
   assert.throws(
-    () => normalizeDashboardCommandPayload({ command: "Pause", runMode: "DRY_RUN" }),
+    () => normalizeOperatorCommandPayload({ command: "Pause", runMode: "DRY_RUN" }),
     /runMode is allowed only with Start/,
   );
   assert.throws(
-    () => normalizeDashboardCommandPayload({ command: "Start", runMode: "REAL_AUTO" }),
-    /cannot be started from dashboard/,
+    () => normalizeOperatorCommandPayload({ command: "Start", runMode: "REAL_AUTO" }),
+    /cannot be started from operator command/,
   );
   assert.throws(
-    () => normalizeDashboardCommandPayload({ command: "Start", feeRate: 0.1 }),
-    /Unsupported dashboard command field/,
+    () => normalizeOperatorCommandPayload({ command: "Start", feeRate: 0.1 }),
+    /Unsupported operator command field/,
   );
   assert.throws(
-    () => normalizeDashboardCommandPayload({ command: "Pause", emergency: true }),
+    () => normalizeOperatorCommandPayload({ command: "Pause", emergency: true }),
     /emergency is allowed only with Stop/,
   );
 });
 
-test("queued command policy rejects forged unsafe dashboard records", () => {
+test("queued command policy rejects forged unsafe operator records", () => {
   assert.deepEqual(
     normalizeQueuedCommandRecord({
       command: "Start",
       commandId: "cmd-1",
-      source: "dashboard",
+      source: "cli",
       runMode: "OBSERVE",
       timestamp: "ignored",
     }),
     {
       command: "Start",
       commandId: "cmd-1",
-      source: "dashboard",
+      source: "cli",
       runMode: "OBSERVE",
     },
   );

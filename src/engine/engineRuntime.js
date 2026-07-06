@@ -30,7 +30,7 @@ const { executionLogMode } = require("../execution/executionPlan");
 const { checkRealRunReadiness } = require("../execution/readinessCheck");
 const { normalizeQueuedCommandRecord, validateCommandMetadata } = require("../core/commandPolicy");
 const {
-  DASHBOARD_LATENCY_DOMAIN,
+  DISPLAY_LATENCY_DOMAIN,
   TRADING_LATENCY_DOMAINS,
 } = require("../core/performanceBudget");
 
@@ -105,8 +105,8 @@ function buildPerformanceBudgetSnapshot(runtimeConfig = {}) {
       maxReconciliationMs: executionGuards.maxReconciliationMs,
     },
     tradingLatencyDomains: TRADING_LATENCY_DOMAINS.slice(),
-    ignoredLatencyDomains: [DASHBOARD_LATENCY_DOMAIN],
-    dashboardLatencyAffectsTrading: false,
+    ignoredLatencyDomains: [DISPLAY_LATENCY_DOMAIN],
+    displayLatencyAffectsTrading: false,
   };
 }
 
@@ -469,12 +469,12 @@ class EngineRuntime {
     if (command === "Stop" && nextState === STATES.STOPPED) {
       await this.handleStopOrderPolicy(this.runtimeConfig.executionPolicy.stopPolicy, {
         command,
-        source: metadata.source || "dashboard",
+        source: metadata.source || "cli",
         emergency: commandMetadata.emergency,
       });
       this.stopFeeds();
       this.emergencyStop.clear({
-        source: metadata.source || "dashboard",
+        source: metadata.source || "cli",
         reason: commandMetadata.emergency ? "emergency-stop-command" : "stop-command",
       });
     }
@@ -498,7 +498,7 @@ class EngineRuntime {
         nextState,
         runMode: this.runtimeConfig.runMode,
         eventTimestamp: event.timestamp,
-        source: metadata.source || "dashboard",
+        source: metadata.source || "cli",
       });
     }
     await this.writeSnapshot();
@@ -588,7 +588,7 @@ class EngineRuntime {
         command = normalizeQueuedCommandRecord(commandRecord);
         await this.applyCommand(command.command, {
           commandId: command.commandId,
-          source: command.source || "dashboard",
+          source: command.source || "cli",
           runMode: command.runMode,
           emergency: command.emergency,
         });
@@ -604,7 +604,7 @@ class EngineRuntime {
             status: "rejected",
             command: commandRecord.command,
             runMode: commandRecord.runMode,
-            source: commandRecord.source || "dashboard",
+            source: commandRecord.source || "cli",
             message: error.message,
           });
         }

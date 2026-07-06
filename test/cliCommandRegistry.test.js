@@ -49,6 +49,48 @@ test("CLI status reads snapshot without HTTP or browser objects", async () => {
   assert.match(result.output, /Markets loaded\s+3/);
 });
 
+test("CLI latency hides legacy browser metrics from stale snapshots", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-cli-latency-"));
+  const snapshotPath = path.join(dir, "latest-snapshot.json");
+  await fs.writeFile(snapshotPath, JSON.stringify({
+    engineState: "RUNNING",
+    runtimeConfig: {
+      runMode: "DRY_RUN",
+    },
+    performanceBudget: {
+      marketData: {},
+      decision: {},
+      execution: {},
+      displayLatencyAffectsTrading: false,
+    },
+    metrics: {
+      browser: {
+        renderSampleCount: 1,
+      },
+      rates: {
+        browserRenderedFramesPerSec: 10,
+        recalculatedCyclesPerSec: 2,
+      },
+      counters: {
+        browserRenderedFrames: 10,
+        recalculatedCycles: 20,
+      },
+    },
+  }));
+  const context = createCliContext({
+    runtimeDir: dir,
+    logDir: path.join(dir, "logs"),
+    snapshotPath,
+    output: memoryOutput(),
+  });
+
+  const result = await runOnce(parseSlashCommand("/latency"), context);
+
+  assert.doesNotMatch(result.output, /browser/i);
+  assert.match(result.output, /display\s+affectsTrading\s+no/);
+  assert.match(result.output, /recalculatedCyclesPerSec/);
+});
+
 test("CLI start queues atomic command inbox file", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-cli-start-"));
   const snapshotPath = path.join(dir, "latest-snapshot.json");

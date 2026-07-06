@@ -4,9 +4,6 @@ const { RUN_MODES } = require("./runtimeConfig");
 const OPERATOR_START_RUN_MODES = new Set(["OBSERVE", "DRY_RUN", "REAL_GUARDED"]);
 const OPERATOR_COMMAND_KEYS = new Set(["command", "runMode", "emergency"]);
 
-const DASHBOARD_START_RUN_MODES = OPERATOR_START_RUN_MODES;
-const DASHBOARD_COMMAND_KEYS = OPERATOR_COMMAND_KEYS;
-
 function normalizeRunMode(runMode) {
   if (runMode === null || runMode === undefined || runMode === "") {
     return null;
@@ -70,32 +67,21 @@ function normalizeOperatorCommandPayload(payload = {}) {
   };
 }
 
-function normalizeDashboardCommandPayload(payload = {}) {
-  try {
-    return normalizeOperatorCommandPayload(payload);
-  } catch (error) {
-    error.message = error.message.replace("operator", "dashboard");
-    throw error;
-  }
-}
-
 function normalizeQueuedCommandRecord(record = {}) {
   const normalized = validateCommandMetadata(record.command, record);
 
   return {
     command: normalized.command,
     commandId: record.commandId,
-    source: record.source || "dashboard",
+    source: record.source || "cli",
     ...(normalized.runMode ? { runMode: normalized.runMode } : {}),
     ...(normalized.emergency ? { emergency: true } : {}),
   };
 }
 
 module.exports = {
-  DASHBOARD_START_RUN_MODES,
   OPERATOR_COMMAND_KEYS,
   OPERATOR_START_RUN_MODES,
-  normalizeDashboardCommandPayload,
   normalizeOperatorCommandPayload,
   normalizeQueuedCommandRecord,
   validateCommandMetadata,
