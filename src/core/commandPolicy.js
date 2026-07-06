@@ -1,8 +1,11 @@
 const { COMMANDS, normalizeCommand } = require("./runStateMachine");
 const { RUN_MODES } = require("./runtimeConfig");
 
-const DASHBOARD_START_RUN_MODES = new Set(["OBSERVE", "DRY_RUN", "REAL_GUARDED"]);
-const DASHBOARD_COMMAND_KEYS = new Set(["command", "runMode", "emergency"]);
+const OPERATOR_START_RUN_MODES = new Set(["OBSERVE", "DRY_RUN", "REAL_GUARDED"]);
+const OPERATOR_COMMAND_KEYS = new Set(["command", "runMode", "emergency"]);
+
+const DASHBOARD_START_RUN_MODES = OPERATOR_START_RUN_MODES;
+const DASHBOARD_COMMAND_KEYS = OPERATOR_COMMAND_KEYS;
 
 function normalizeRunMode(runMode) {
   if (runMode === null || runMode === undefined || runMode === "") {
@@ -26,8 +29,8 @@ function validateCommandMetadata(command, metadata = {}) {
     throw new Error("runMode is allowed only with Start commands");
   }
 
-  if (runMode && !DASHBOARD_START_RUN_MODES.has(runMode)) {
-    throw new Error(`runMode cannot be started from dashboard: ${runMode}`);
+  if (runMode && !OPERATOR_START_RUN_MODES.has(runMode)) {
+    throw new Error(`runMode cannot be started from operator command: ${runMode}`);
   }
 
   if (metadata.emergency !== undefined && metadata.emergency !== null) {
@@ -47,14 +50,14 @@ function validateCommandMetadata(command, metadata = {}) {
   };
 }
 
-function normalizeDashboardCommandPayload(payload = {}) {
+function normalizeOperatorCommandPayload(payload = {}) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("Command payload must be a JSON object");
   }
 
   for (const key of Object.keys(payload)) {
-    if (!DASHBOARD_COMMAND_KEYS.has(key)) {
-      throw new Error(`Unsupported dashboard command field: ${key}`);
+    if (!OPERATOR_COMMAND_KEYS.has(key)) {
+      throw new Error(`Unsupported operator command field: ${key}`);
     }
   }
 
@@ -65,6 +68,15 @@ function normalizeDashboardCommandPayload(payload = {}) {
     ...(normalized.runMode ? { runMode: normalized.runMode } : {}),
     ...(normalized.emergency ? { emergency: true } : {}),
   };
+}
+
+function normalizeDashboardCommandPayload(payload = {}) {
+  try {
+    return normalizeOperatorCommandPayload(payload);
+  } catch (error) {
+    error.message = error.message.replace("operator", "dashboard");
+    throw error;
+  }
 }
 
 function normalizeQueuedCommandRecord(record = {}) {
@@ -81,7 +93,10 @@ function normalizeQueuedCommandRecord(record = {}) {
 
 module.exports = {
   DASHBOARD_START_RUN_MODES,
+  OPERATOR_COMMAND_KEYS,
+  OPERATOR_START_RUN_MODES,
   normalizeDashboardCommandPayload,
+  normalizeOperatorCommandPayload,
   normalizeQueuedCommandRecord,
   validateCommandMetadata,
 };

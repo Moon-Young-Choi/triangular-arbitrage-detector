@@ -5,6 +5,7 @@ const { LiveTriangleState, parseFeeRate } = require("../live/liveState");
 const { UpbitWsOrderbookClient } = require("../exchanges/upbit/publicWsOrderbookClient");
 const { freezeRuntimeConfig, loadRuntimeConfig, RUN_MODES } = require("../core/runtimeConfig");
 const { AppendOnlyLogStore } = require("../core/appendOnlyLog");
+const { CommandInbox } = require("../core/commandInbox");
 const { CommandStatusStore } = require("../core/commandStatusStore");
 const { RunStateMachine, STATES, normalizeCommand } = require("../core/runStateMachine");
 const { UpbitPrivateWsClient } = require("../exchanges/upbit/privateWsClient");
@@ -127,6 +128,9 @@ class EngineRuntime {
     this.commandStatusStore = options.commandStatusStore || new CommandStatusStore({
       runtimeDir: this.runtimeDir,
     });
+    this.commandInbox = options.commandInbox || new CommandInbox({
+      runtimeDir: this.runtimeDir,
+    });
     this.runtimeConfig = options.runtimeConfig || loadRuntimeConfig({
       configPath: options.runtimeConfigPath,
       allowLiveTrading: process.env.Q_GAGARIN_ALLOW_LIVE_TRADING === "true",
@@ -237,6 +241,7 @@ class EngineRuntime {
 
   async initialize() {
     await this.logStore.ensureFiles();
+    await this.commandInbox.ensureDirs();
     await this.seedProcessedCommands();
 
     if (!this.started) {
@@ -502,6 +507,75 @@ class EngineRuntime {
   }
 
   async processCommands() {
+    await this.processCommandInbox();
+    await this.processLegacyCommandLog();
+  }
+
+  async appendCommandAudit(commandRecord, command = null) {
+    const commandRunMode = command && command.runMode || commandRecord.runMode || this.runtimeConfig.runMode;
+
+    return this.logStore.append("commands", {
+      type: commandRecord.type || `${commandRecord.source || "cli"}.command`,
+      mode: executionLogMode(commandRunMode),
+      engineState: this.machine.state,
+      command: command ? command.command : commandRecord.command,
+      commandId: commandRecord.commandId,
+      runMode: command && command.runMode || commandRecord.runMode,
+      emergency: Boolean(command && command.emergency || commandRecord.emergency),
+      source: commandRecord.source || "cli",
+      queuedAt: commandRecord.createdAt || commandRecord.queuedAt || commandRecord.timestamp,
+    });
+  }
+
+  async processCommandInbox() {
+    const entries = await this.commandInbox.listPending();
+
+    for (const entry of entries) {
+      const commandRecord = entry.record || {};
+      const key = commandRecord.commandId || entry.fileName;
+      if (this.processedCommandKeys.has(key)) {
+        await this.commandInbox.markProcessed(entry);
+        continue;
+      }
+      this.processedCommandKeys.add(key);
+      let command;
+
+      try {
+        if (entry.error) throw entry.error;
+        command = normalizeQueuedCommandRecord(commandRecord);
+        await this.appendCommandAudit(commandRecord, command);
+        await this.applyCommand(command.command, {
+          commandId: command.commandId,
+          source: command.source || "cli",
+          runMode: command.runMode,
+          emergency: command.emergency,
+        });
+      } catch (error) {
+        await this.logStore.append("errors", {
+          type: "engine.command.rejected",
+          command: commandRecord.command,
+          commandId: commandRecord.commandId,
+          source: commandRecord.source || "cli",
+          message: error.message,
+        });
+        if (commandRecord.commandId) {
+          await this.commandStatusStore.write(commandRecord.commandId, {
+            status: "rejected",
+            command: commandRecord.command,
+            runMode: commandRecord.runMode,
+            source: commandRecord.source || "cli",
+            message: error.message,
+          });
+        }
+      } finally {
+        await this.commandInbox.markProcessed(entry).catch((error) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+      }
+    }
+  }
+
+  async processLegacyCommandLog() {
     const commands = await this.logStore.readAll("commands", { limit: 1000 });
 
     for (const commandRecord of commands) {

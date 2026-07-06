@@ -1,5 +1,5 @@
 const fs = require("node:fs/promises");
-const { summarizeDryRun } = require("../dashboard/dryRunReport");
+const { summarizeDryRun } = require("../ops/dryRunReport");
 const { readFilteredLogs } = require("../live/logReadModel");
 
 async function fileExists(filePath) {

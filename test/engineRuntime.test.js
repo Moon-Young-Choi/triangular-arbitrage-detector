@@ -6,6 +6,7 @@ const path = require("node:path");
 const { buildPerformanceBudgetSnapshot, EngineRuntime } = require("../src/engine/engineRuntime");
 const { DEFAULT_RUNTIME_CONFIG } = require("../src/core/runtimeConfig");
 const { AppendOnlyLogStore } = require("../src/core/appendOnlyLog");
+const { CommandInbox } = require("../src/core/commandInbox");
 const { CommandStatusStore } = require("../src/core/commandStatusStore");
 const { FillTracker } = require("../src/execution/fillTracker");
 const { BalanceTracker } = require("../src/execution/balanceTracker");
@@ -293,6 +294,49 @@ test("engine runtime accepts fresh mode-aware commands and writes delta/status",
   assert.equal(stateChanged.auditSchema.ok, true);
   assert.equal(delta.type, "delta");
   assert.equal(delta.stateDelta.engineState, "RUNNING");
+});
+
+test("engine runtime processes atomic command inbox files once", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-command-inbox-"));
+  const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
+  const commandStatusStore = new CommandStatusStore({ runtimeDir: dir });
+  const commandInbox = new CommandInbox({
+    runtimeDir: dir,
+    randomUUID: () => "77777777-7777-4777-8777-777777777777",
+    now: () => new Date("2026-07-06T12:00:00.000Z"),
+  });
+  await logStore.ensureFiles();
+  await commandInbox.enqueue({
+    command: "Start",
+    runMode: "DRY_RUN",
+    source: "cli",
+  });
+  const observationClient = fakeWsClient();
+  const runtime = new EngineRuntime({
+    runtimeDir: dir,
+    logStore,
+    commandStatusStore,
+    commandInbox,
+    state: fakeState(),
+    runtimeConfig: DEFAULT_RUNTIME_CONFIG,
+    observationClient,
+    validationClient: fakeWsClient(),
+    validationFeedStartDelayMs: 0,
+    startedAtEpochMs: Date.now() - 1000,
+  });
+
+  await runtime.processCommands();
+  await runtime.processCommands();
+  const status = await commandStatusStore.read("77777777-7777-4777-8777-777777777777");
+  const commandAudit = await logStore.readAll("commands");
+  const pending = await commandInbox.listPending();
+
+  assert.equal(runtime.machine.state, "RUNNING");
+  assert.equal(status.status, "accepted");
+  assert.equal(commandAudit.length, 1);
+  assert.equal(commandAudit[0].type, "cli.command");
+  assert.equal(commandAudit[0].auditSchema.ok, true);
+  assert.equal(pending.length, 0);
 });
 
 test("engine runtime rejects unsafe queued dashboard command metadata", async () => {

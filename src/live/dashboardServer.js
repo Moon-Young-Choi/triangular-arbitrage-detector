@@ -6,12 +6,12 @@ const WebSocket = require("ws");
 const { AppendOnlyLogStore } = require("../core/appendOnlyLog");
 const { CommandStatusStore } = require("../core/commandStatusStore");
 const { EventLog } = require("../core/eventLog");
-const { commandFromPathname, createDashboardCommandApi } = require("../dashboard/commandApi");
+const { commandFromPathname, createDashboardCommandApi } = require("../ops/commandQueue");
 const {
   createTelemetryReadModel,
   readDelta,
   readSnapshot,
-} = require("../dashboard/telemetryReadModel");
+} = require("../ops/telemetryReadModel");
 
 function contentTypeFor(filePath) {
   const extension = path.extname(filePath);
@@ -86,7 +86,7 @@ function createDashboardRequestHandler(options = {}) {
     commandStatusStore = new CommandStatusStore({
       runtimeDir: path.dirname(snapshotPath),
     }),
-    plotlyPath = require.resolve("plotly.js-dist-min/plotly.min.js"),
+    plotlyPath = null,
     logStore = new AppendOnlyLogStore(),
     sseClients = new Set(),
   } = options;
@@ -200,6 +200,10 @@ function createDashboardRequestHandler(options = {}) {
       }
 
       if (req.method === "GET" && requestUrl.pathname === "/vendor/plotly.min.js") {
+        if (!plotlyPath) {
+          sendText(res, 410, "Browser dashboard assets are deprecated. Use npm run cli.");
+          return;
+        }
         await serveFile(res, plotlyPath);
         return;
       }

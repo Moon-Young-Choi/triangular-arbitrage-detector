@@ -11,7 +11,7 @@ const { CommandStatusStore } = require("../core/commandStatusStore");
 const { normalizeDashboardCommandPayload } = require("../core/commandPolicy");
 const { UpbitWsOrderbookClient } = require("../exchanges/upbit/publicWsOrderbookClient");
 const { executionLogMode } = require("../execution/executionPlan");
-const { dryRunReportCsv, summarizeDryRun } = require("../dashboard/dryRunReport");
+const { dryRunReportCsv, summarizeDryRun } = require("../ops/dryRunReport");
 const { readFilteredLogs } = require("./logReadModel");
 
 function contentTypeFor(filePath) {
@@ -125,7 +125,7 @@ function createRequestHandler(options) {
   const {
     state,
     publicDir = path.resolve(process.cwd(), "public"),
-    plotlyPath = require.resolve("plotly.js-dist-min/plotly.min.js"),
+    plotlyPath = null,
     logStore = new AppendOnlyLogStore(),
     commandStatusStore = new CommandStatusStore(),
     commandHandler = null,
@@ -325,6 +325,10 @@ function createRequestHandler(options) {
       }
 
       if (req.method === "GET" && requestUrl.pathname === "/vendor/plotly.min.js") {
+        if (!plotlyPath) {
+          sendText(res, 410, "Browser dashboard assets are deprecated. Use npm run cli.");
+          return;
+        }
         await serveFile(res, plotlyPath);
         return;
       }

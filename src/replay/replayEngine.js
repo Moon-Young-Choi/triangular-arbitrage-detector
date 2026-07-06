@@ -1,6 +1,6 @@
 const { calculateCycleMultiplier } = require("../lib/multiplier");
 const { DryRunExecutor } = require("../execution/dryRunExecutor");
-const { summarizeDryRun } = require("../dashboard/dryRunReport");
+const { summarizeDryRun } = require("../ops/dryRunReport");
 const { validateDepthAwareCandidate } = require("../live/candidateValidator");
 const { createStrategyRegistry } = require("../strategies/registry");
 const { latestOrderbooksAt } = require("./orderbookTape");

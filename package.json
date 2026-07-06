@@ -8,12 +8,16 @@
     "ticker": "node src/rest/ticker.js",
     "ticker:ws": "node src/ws/ticker.js",
     "triangles": "node scripts/scan-triangles.js",
-    "triangles:live": "node scripts/serve-triangles-live.js",
+    "triangles:live": "node scripts/deprecated-browser-dashboard.js",
     "engine": "node scripts/run-engine.js",
-    "dashboard": "node scripts/run-dashboard.js",
+    "cli": "node scripts/qg-cli.js",
+    "cli:watch": "node scripts/qg-cli.js /watch",
+    "cli:logs": "node scripts/qg-cli.js /logs --follow",
+    "cli:desk": "node scripts/qg-cli.js /desk --watch",
+    "dashboard": "node scripts/deprecated-browser-dashboard.js",
     "replay:dryrun": "node scripts/replay-dryrun.js",
     "baseline": "node scripts/benchmark-live-baseline.js",
-    "check": "find src scripts public test -name '*.js' -print0 | xargs -0 -n1 node --check",
+    "check": "find src scripts test -name '*.js' -print0 | xargs -0 -n1 node --check",
     "test": "npm run check && node --test"
   },
   "engines": {
@@ -32,7 +36,6 @@
   "homepage": "https://github.com/Moon-Young-Choi/q-gagarin#readme",
   "dependencies": {
     "axios": "^1.18.1",
-    "plotly.js-dist-min": "^3.7.0",
     "ws": "^8.21.0"
   }
 }

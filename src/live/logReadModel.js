@@ -1,7 +1,7 @@
 const {
   dryRunReportCsv,
   summarizeDryRun,
-} = require("../dashboard/dryRunReport");
+} = require("../ops/dryRunReport");
 
 const LOG_KINDS = ["events", "decisions", "market", "orders", "fills", "errors"];
 

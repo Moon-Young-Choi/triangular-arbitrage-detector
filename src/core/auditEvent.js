@@ -37,6 +37,7 @@ const CANONICAL_AUDIT_TYPES = new Set([
   "cycle.aborted",
   "pnl.realized",
   "dashboard.command",
+  "cli.command",
   "engine.state_changed",
   "position.residual_recorded",
 ]);
@@ -70,7 +71,7 @@ function hasField(record, field) {
 function requiredFieldsForType(type, kind) {
   const common = ["eventId", "traceId", "ts", "timestamp", "type", "exchange", "payload"];
 
-  if (type === "dashboard.command") {
+  if (type === "dashboard.command" || type === "cli.command") {
     return [...common, "mode", "engineState", "commandId", "command"];
   }
 
