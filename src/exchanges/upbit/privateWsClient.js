@@ -144,13 +144,14 @@ class UpbitPrivateWsClient extends EventEmitter {
     });
   }
 
-  getStatus(status) {
+  getStatus(status, metadata = {}) {
     return {
       endpoint: this.endpoint,
       status: status || (this.stopped ? "stopped" : "unknown"),
       stopped: this.stopped,
       lastMessageAt: this.lastMessageAt,
       reconnectAttempt: this.reconnectAttempt,
+      ...metadata,
     };
   }
 }

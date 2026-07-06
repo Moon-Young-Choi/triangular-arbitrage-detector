@@ -92,11 +92,6 @@ h2 {
   opacity: 0.45;
 }
 
-#emergencyStopButton {
-  border-color: rgba(216, 63, 123, 0.45);
-  color: #9e1f52;
-}
-
 .tabs {
   display: flex;
   flex-wrap: wrap;

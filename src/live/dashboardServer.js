@@ -1,18 +1,17 @@
 const http = require("node:http");
 const fs = require("node:fs/promises");
 const path = require("node:path");
-const crypto = require("node:crypto");
 const { URL } = require("node:url");
 const WebSocket = require("ws");
 const { AppendOnlyLogStore } = require("../core/appendOnlyLog");
 const { CommandStatusStore } = require("../core/commandStatusStore");
-const { normalizeCommand } = require("../core/runStateMachine");
+const { EventLog } = require("../core/eventLog");
+const { commandFromPathname, createDashboardCommandApi } = require("../dashboard/commandApi");
 const {
-  readFilteredLogs,
-  summarizeDryRun,
-  dryRunReportCsv,
-} = require("./logReadModel");
-const { formatLocalTimestampForFilename } = require("./liveUtils");
+  createTelemetryReadModel,
+  readDelta,
+  readSnapshot,
+} = require("../dashboard/telemetryReadModel");
 
 function contentTypeFor(filePath) {
   const extension = path.extname(filePath);
@@ -80,68 +79,9 @@ async function serveFile(res, filePath) {
   }
 }
 
-async function readSnapshot(snapshotPath) {
-  try {
-    return JSON.parse(await fs.readFile(snapshotPath, "utf8"));
-  } catch (error) {
-    if (error.code === "ENOENT") {
-      return {
-        type: "full-state",
-        summary: {
-          marketsLoaded: 0,
-          uniqueTriangleCount: 0,
-          plottedCycleCount: 0,
-        },
-        cycles: [],
-        groups: [],
-        engine: {
-          state: "STOPPED",
-        },
-        engineState: "STOPPED",
-        eventLog: [],
-      };
-    }
-
-    throw error;
-  }
-}
-
-async function readDelta(deltaPath) {
-  try {
-    return JSON.parse(await fs.readFile(deltaPath, "utf8"));
-  } catch (error) {
-    if (error.code === "ENOENT") {
-      return null;
-    }
-
-    throw error;
-  }
-}
-
-async function saveCapture(capturesDir, payload) {
-  const { imageDataUrl, snapshot, timestamp } = payload;
-
-  if (typeof imageDataUrl !== "string" || !imageDataUrl.startsWith("data:image/png;base64,")) {
-    throw new Error("imageDataUrl must be a PNG data URL");
-  }
-
-  const captureDate = timestamp ? new Date(timestamp) : new Date();
-  const stamp = formatLocalTimestampForFilename(Number.isNaN(captureDate.getTime()) ? new Date() : captureDate);
-  const baseName = `upbit-triangle-live-${stamp}`;
-  const pngPath = path.join(capturesDir, `${baseName}.png`);
-  const jsonPath = path.join(capturesDir, `${baseName}.json`);
-
-  await fs.mkdir(capturesDir, { recursive: true });
-  await fs.writeFile(pngPath, Buffer.from(imageDataUrl.slice("data:image/png;base64,".length), "base64"));
-  await fs.writeFile(jsonPath, `${JSON.stringify({ timestamp: captureDate.toISOString(), snapshot }, null, 2)}\n`);
-
-  return { pngPath, jsonPath };
-}
-
-function createDashboardRequestHandler(options) {
+function createDashboardRequestHandler(options = {}) {
   const {
     publicDir = path.resolve(process.cwd(), "public"),
-    capturesDir = path.resolve(process.cwd(), "out", "captures"),
     snapshotPath = path.resolve(process.cwd(), "out", "runtime", "latest-snapshot.json"),
     commandStatusStore = new CommandStatusStore({
       runtimeDir: path.dirname(snapshotPath),
@@ -150,6 +90,19 @@ function createDashboardRequestHandler(options) {
     logStore = new AppendOnlyLogStore(),
     sseClients = new Set(),
   } = options;
+  const eventLog = options.eventLog || new EventLog({
+    logStore,
+    eventBus: options.eventBus,
+  });
+  const telemetryReadModel = options.telemetryReadModel || createTelemetryReadModel({
+    snapshotPath,
+    logStore: eventLog,
+  });
+  const commandApi = options.commandApi || createDashboardCommandApi({
+    eventLog,
+    commandStatusStore,
+    readSnapshot: () => telemetryReadModel.snapshot(),
+  });
 
   return async function requestHandler(req, res) {
     if (!isLocalRequest(req)) {
@@ -160,48 +113,26 @@ function createDashboardRequestHandler(options) {
     const requestUrl = new URL(req.url, "http://localhost");
 
     try {
-      if (req.method === "GET" && requestUrl.pathname === "/api/health") {
-        const snapshot = await readSnapshot(snapshotPath);
-        sendJson(res, 200, {
-          ok: true,
-          dashboard: true,
-          engineState: snapshot.engineState || (snapshot.engine && snapshot.engine.state) || "UNKNOWN",
-        });
+      if (req.method === "GET" && ["/api/health", "/api/dashboard/health"].includes(requestUrl.pathname)) {
+        sendJson(res, 200, await telemetryReadModel.health());
         return;
       }
 
-      if (req.method === "GET" && requestUrl.pathname === "/api/state") {
-        sendJson(res, 200, await readSnapshot(snapshotPath));
+      if (req.method === "GET" && ["/api/state", "/api/dashboard/snapshot"].includes(requestUrl.pathname)) {
+        sendJson(res, 200, await telemetryReadModel.snapshot());
         return;
       }
 
-      if (req.method === "GET" && requestUrl.pathname === "/api/logs") {
-        const kind = requestUrl.searchParams.get("kind") || "all";
-        const limit = Number.parseInt(requestUrl.searchParams.get("limit") || "200", 10);
-        const filters = {
-          kind,
-          limit: Number.isInteger(limit) ? limit : 200,
-          mode: requestUrl.searchParams.get("mode") || "",
-          type: requestUrl.searchParams.get("type") || "",
-          startAsset: requestUrl.searchParams.get("startAsset") || "",
-          strategyId: requestUrl.searchParams.get("strategyId") || "",
-          cycleId: requestUrl.searchParams.get("cycleId") || "",
-        };
-        sendJson(res, 200, {
-          ok: true,
-          kind,
-          logs: await readFilteredLogs(logStore, filters),
-        });
+      if (req.method === "GET" && ["/api/logs", "/api/dashboard/logs"].includes(requestUrl.pathname)) {
+        sendJson(res, 200, await telemetryReadModel.logsFromUrl(requestUrl));
         return;
       }
 
-      if (req.method === "GET" && requestUrl.pathname === "/api/dry-run-report") {
-        const logs = await readFilteredLogs(logStore, {
-          kind: "all",
-          limit: Number.parseInt(requestUrl.searchParams.get("limit") || "5000", 10),
-          mode: "DRY_RUN",
-        });
-        const summary = summarizeDryRun(logs);
+      if (
+        req.method === "GET" &&
+        ["/api/dry-run-report", "/api/dashboard/dry-run-report"].includes(requestUrl.pathname)
+      ) {
+        const report = await telemetryReadModel.dryRunReportFromUrl(requestUrl);
 
         if (requestUrl.searchParams.get("format") === "csv") {
           res.writeHead(200, {
@@ -209,60 +140,40 @@ function createDashboardRequestHandler(options) {
             "Cache-Control": "no-store",
             "Content-Disposition": "attachment; filename=\"dry-run-report.csv\"",
           });
-          res.end(dryRunReportCsv(summary));
+          res.end(report.csv);
           return;
         }
 
         sendJson(res, 200, {
           ok: true,
-          summary,
-          logs,
+          summary: report.summary,
+          logs: report.logs,
         });
         return;
       }
 
-      if (req.method === "POST" && requestUrl.pathname === "/api/command") {
-        const payload = await readJsonBody(req);
-        let command;
-
-        try {
-          command = normalizeCommand(payload.command);
-        } catch (error) {
-          sendJson(res, 400, { ok: false, error: error.message });
+      const pathCommand = commandFromPathname(requestUrl.pathname);
+      if (
+        req.method === "POST" &&
+        (requestUrl.pathname === "/api/command" || pathCommand !== null)
+      ) {
+        if (pathCommand === undefined) {
+          sendJson(res, 400, { ok: false, error: "Invalid engine command endpoint" });
           return;
         }
 
-        const commandId = crypto.randomUUID();
-        const record = await logStore.append("commands", {
-          type: "engine.command.requested",
-          command,
-          commandId,
-          runMode: payload.runMode,
-          emergency: payload.emergency === true,
-          source: "dashboard",
-        });
-        await commandStatusStore.write(commandId, {
-          status: "queued",
-          command,
-          runMode: payload.runMode,
-          emergency: payload.emergency === true,
-          source: "dashboard",
-          queuedAt: record.timestamp,
-        });
-
-        sendJson(res, 202, {
-          ok: true,
-          command: record.command,
-          commandId: record.commandId,
-          runMode: record.runMode,
-          status: "queued",
-        });
+        try {
+          const result = await commandApi.queue(await readJsonBody(req), pathCommand);
+          sendJson(res, 202, result);
+        } catch (error) {
+          sendJson(res, 400, { ok: false, error: error.message });
+        }
         return;
       }
 
       if (req.method === "GET" && requestUrl.pathname.startsWith("/api/commands/")) {
         const commandId = requestUrl.pathname.slice("/api/commands/".length);
-        const status = await commandStatusStore.read(commandId);
+        const status = await commandApi.readStatus(commandId);
 
         if (!status) {
           sendJson(res, 404, { ok: false, error: "Command status not found" });
@@ -284,17 +195,7 @@ function createDashboardRequestHandler(options) {
         req.on("close", () => {
           sseClients.delete(res);
         });
-        res.write(`event: state\ndata: ${JSON.stringify(await readSnapshot(snapshotPath))}\n\n`);
-        return;
-      }
-
-      if (req.method === "POST" && requestUrl.pathname === "/api/capture") {
-        const saved = await saveCapture(capturesDir, await readJsonBody(req, 20 * 1024 * 1024));
-        sendJson(res, 200, {
-          ok: true,
-          pngPath: path.relative(process.cwd(), saved.pngPath),
-          jsonPath: path.relative(process.cwd(), saved.jsonPath),
-        });
+        res.write(`event: state\ndata: ${JSON.stringify(await telemetryReadModel.snapshot())}\n\n`);
         return;
       }
 
@@ -333,15 +234,25 @@ async function startDashboardServer(options = {}) {
   const commandStatusStore = options.commandStatusStore || new CommandStatusStore({
     runtimeDir: path.dirname(snapshotPath),
   });
+  const eventLog = options.eventLog || new EventLog({
+    logStore,
+    eventBus: options.eventBus,
+  });
   const sseClients = new Set();
   const liveWsClients = new Set();
   const wsServer = new WebSocket.Server({ noServer: true });
+  const telemetryReadModel = options.telemetryReadModel || createTelemetryReadModel({
+    snapshotPath,
+    logStore: eventLog,
+  });
   const server = http.createServer(createDashboardRequestHandler({
     ...options,
     snapshotPath,
     logStore,
     commandStatusStore,
     sseClients,
+    telemetryReadModel,
+    eventLog,
   }));
   const pushIntervalMs = options.pushIntervalMs ||
     Number.parseInt(process.env.UI_PUSH_INTERVAL_MS || "250", 10);
@@ -354,7 +265,7 @@ async function startDashboardServer(options = {}) {
       sentAtEpochMs: Date.now(),
       uiPushIntervalMs: pushIntervalMs,
     }));
-    socket.send(JSON.stringify(await readSnapshot(snapshotPath)));
+    socket.send(JSON.stringify(await telemetryReadModel.snapshot()));
     socket.on("message", (data) => {
       try {
         JSON.parse(data.toString("utf8"));

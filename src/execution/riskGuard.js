@@ -1,6 +1,9 @@
+const { evaluateExecutionLatencyBudget } = require("../core/performanceBudget");
+
 class TokenBucketRateLimiter {
   constructor(options = {}) {
-    this.limitPerSecond = options.limitPerSecond || 8;
+    const limit = Number(options.limitPerSecond);
+    this.limitPerSecond = Number.isFinite(limit) ? limit : 8;
     this.timestamps = [];
   }
 
@@ -74,6 +77,13 @@ class RiskGuard {
     const execution = this.config.executionGuards || {};
     const nowMs = context.nowMs || Date.now();
 
+    if (context.emergencyStopActive === true) {
+      return this.reject("EMERGENCY_STOP_ACTIVE", {
+        emergencyStop: true,
+        emergencyStopReason: context.emergencyStopReason || null,
+      });
+    }
+
     if (context.privateWsConnected !== true) {
       return this.reject("PRIVATE_WS_DISCONNECTED");
     }
@@ -99,6 +109,21 @@ class RiskGuard {
     return this.accept();
   }
 
+  evaluateExecutionLatency(execution = {}) {
+    const result = evaluateExecutionLatencyBudget(execution, this.config.executionGuards || {});
+
+    if (!result.ok) {
+      return this.reject(result.rejectionReason, {
+        metric: result.metric,
+        observedMs: result.observedMs,
+        limitMs: result.limitMs,
+        emergencyStop: result.emergencyStop,
+      });
+    }
+
+    return this.accept();
+  }
+
   evaluatePlan(plan, context = {}) {
     const limits = this.config.realRunLimits || {};
     const market = this.config.marketDataGuards || {};
@@ -107,6 +132,26 @@ class RiskGuard {
     const startAsset = plan.startAsset || (plan.cycle && plan.cycle.startAsset);
     const startAmount = Number(plan.startAmount || 0);
     const maxNotional = limits.maxNotionalPerCycleByAsset && Number(limits.maxNotionalPerCycleByAsset[startAsset]);
+    const availableBalances = context.availableBalances || {};
+    const lockedBalances = context.lockedBalances || {};
+    const availableBalance = Number(availableBalances[startAsset]);
+    const lockedBalance = Number(lockedBalances[startAsset] || 0);
+
+    if (context.emergencyStopActive === true) {
+      return this.reject("EMERGENCY_STOP_ACTIVE", {
+        emergencyStop: true,
+        emergencyStopReason: context.emergencyStopReason || null,
+      });
+    }
+
+    if (startAsset && Number.isFinite(availableBalance) && startAmount > availableBalance) {
+      return this.reject("BALANCE_INSUFFICIENT", {
+        startAsset,
+        startAmount,
+        availableBalance,
+        lockedBalance: Number.isFinite(lockedBalance) ? lockedBalance : null,
+      });
+    }
 
     if (Number.isFinite(maxNotional) && startAmount > maxNotional) {
       return this.reject("MAX_NOTIONAL_PER_CYCLE", { startAsset, startAmount, maxNotional });
@@ -116,10 +161,12 @@ class RiskGuard {
       return this.reject("MAX_OPEN_ORDERS");
     }
 
-    const cutoff = nowMs - 60000;
-    this.cycleTimestamps = this.cycleTimestamps.filter((item) => item >= cutoff);
-    if (this.cycleTimestamps.length >= Number(limits.maxCyclesPerMinute || Infinity)) {
-      return this.reject("MAX_CYCLES_PER_MINUTE");
+    if (context.skipCycleRateLimit !== true) {
+      const cutoff = nowMs - 60000;
+      this.cycleTimestamps = this.cycleTimestamps.filter((item) => item >= cutoff);
+      if (this.cycleTimestamps.length >= Number(limits.maxCyclesPerMinute || Infinity)) {
+        return this.reject("MAX_CYCLES_PER_MINUTE");
+      }
     }
 
     if (Number(plan.oldestLegAgeMs || 0) > Number(market.maxOldestLegAgeMs || Infinity)) {
@@ -138,8 +185,17 @@ class RiskGuard {
       return this.reject("DECISION_STALE");
     }
 
-    if (Number(context.dailyLoss || 0) > Number(limits.maxDailyLossByAsset && limits.maxDailyLossByAsset[startAsset] || Infinity)) {
-      return this.reject("MAX_DAILY_LOSS", { startAsset });
+    const dailyLossByAsset = context.dailyLossByAsset || {};
+    const dailyLoss = Number(dailyLossByAsset[startAsset] ?? context.dailyLoss ?? 0);
+    const maxDailyLoss = Number(limits.maxDailyLossByAsset && limits.maxDailyLossByAsset[startAsset] || Infinity);
+
+    if (dailyLoss > 0 && dailyLoss >= maxDailyLoss) {
+      return this.reject("MAX_DAILY_LOSS", {
+        startAsset,
+        dailyLoss,
+        maxDailyLoss,
+        emergencyStop: true,
+      });
     }
 
     if (context.skipOrderGuards === true) {

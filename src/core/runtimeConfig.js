@@ -1,10 +1,19 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const {
+  DEFAULT_EXECUTION_MODE,
+  EXECUTION_MODE_SET,
+} = require("../execution/executionModes");
+const {
+  DEFAULT_PARTIAL_FILL_POLICY,
+  PARTIAL_FILL_POLICY_SET,
+} = require("../execution/partialFillPolicy");
 
 const DEFAULT_RUNTIME_CONFIG_PATH = path.resolve(process.cwd(), "config", "runtime.json");
 const RUN_MODES = new Set(["OBSERVE", "DRY_RUN", "REAL_GUARDED", "REAL_AUTO"]);
 const START_ASSETS = new Set(["KRW", "BTC", "USDT"]);
-const EXECUTION_MODES = new Set(["LIMIT_IOC_AT_OBSERVED_BEST", "BEST_IOC"]);
+const EXECUTION_MODES = EXECUTION_MODE_SET;
+const PARTIAL_FILL_POLICIES = PARTIAL_FILL_POLICY_SET;
 
 const DEFAULT_RUNTIME_CONFIG = {
   runMode: "OBSERVE",
@@ -12,12 +21,13 @@ const DEFAULT_RUNTIME_CONFIG = {
   enabledStartAssets: ["KRW", "BTC", "USDT"],
   observationOrderbookUnit: 5,
   validationOrderbookUnit: 30,
-  executionMode: "LIMIT_IOC_AT_OBSERVED_BEST",
-  enabledExecutionModes: ["LIMIT_IOC_AT_OBSERVED_BEST"],
+  executionMode: DEFAULT_EXECUTION_MODE,
+  enabledExecutionModes: [DEFAULT_EXECUTION_MODE],
   liveTradingEnabled: false,
   activeStrategyId: "topOfBookBaseline",
   executionPolicy: {
     stopPolicy: "CANCEL_OPEN_ORDERS",
+    partialFillPolicy: DEFAULT_PARTIAL_FILL_POLICY,
     allowBestIoc: false,
     simulatedBalances: {
       KRW: 1000000,
@@ -50,6 +60,17 @@ const DEFAULT_RUNTIME_CONFIG = {
       accountBalanceTtlMs: 30000,
       validationOrderbookTtlMs: 1000,
       orderRateLimitPerSecond: 8,
+      maxOrderAckMs: 500,
+      maxReconciliationMs: 3000,
+    },
+    readinessGuards: {
+      minimumDryRunSamples: 10,
+      minimumDryRunSamplesPerStartAsset: 1,
+      maxDryRunRejectionRate: 0.8,
+      minimumDryRunCompleteRate: 0.5,
+      maxDryRunDepthRejectionRate: 0.8,
+      maxDryRunLatencyRejectionRate: 0.2,
+      maxDryRunExpectedSimulatedGapRate: 1,
     },
   },
   candidateValidation: {
@@ -71,6 +92,7 @@ const DEFAULT_RUNTIME_CONFIG = {
       USDT: 5,
     },
     minNetProfitRate: 0,
+    maxObservationValidationGapMs: 500,
   },
 };
 
@@ -192,12 +214,20 @@ function validateRuntimeConfig(input, options = {}) {
     throw new Error(`Invalid executionPolicy.stopPolicy: ${config.executionPolicy.stopPolicy}`);
   }
 
+  if (!PARTIAL_FILL_POLICIES.has(config.executionPolicy.partialFillPolicy)) {
+    throw new Error(`Invalid executionPolicy.partialFillPolicy: ${config.executionPolicy.partialFillPolicy}`);
+  }
+
   if (typeof config.executionPolicy.allowBestIoc !== "boolean") {
     throw new Error("executionPolicy.allowBestIoc must be a boolean");
   }
 
   if (config.executionMode === "BEST_IOC" && config.executionPolicy.allowBestIoc !== true) {
     throw new Error("BEST_IOC requires executionPolicy.allowBestIoc=true");
+  }
+
+  if (!isPlainObject(config.executionPolicy.readinessGuards)) {
+    throw new Error("executionPolicy.readinessGuards must be an object");
   }
 
   validateNonNegativeAssetAmounts(config.executionPolicy.simulatedBalances, "executionPolicy.simulatedBalances");
@@ -222,10 +252,24 @@ function validateRuntimeConfig(input, options = {}) {
     accountBalanceTtlMs: config.executionPolicy.executionGuards.accountBalanceTtlMs,
     validationOrderbookTtlMs: config.executionPolicy.executionGuards.validationOrderbookTtlMs,
     orderRateLimitPerSecond: config.executionPolicy.executionGuards.orderRateLimitPerSecond,
+    maxOrderAckMs: config.executionPolicy.executionGuards.maxOrderAckMs,
+    maxReconciliationMs: config.executionPolicy.executionGuards.maxReconciliationMs,
+    "readinessGuards.minimumDryRunSamples": config.executionPolicy.readinessGuards.minimumDryRunSamples,
+    "readinessGuards.minimumDryRunSamplesPerStartAsset": config.executionPolicy.readinessGuards.minimumDryRunSamplesPerStartAsset,
   })) {
     if (!Number.isFinite(Number(value)) || Number(value) < 0) {
       throw new Error(`executionPolicy.${name} must be a non-negative number`);
     }
+  }
+
+  for (const [name, value] of Object.entries({
+    maxDryRunRejectionRate: config.executionPolicy.readinessGuards.maxDryRunRejectionRate,
+    minimumDryRunCompleteRate: config.executionPolicy.readinessGuards.minimumDryRunCompleteRate,
+    maxDryRunDepthRejectionRate: config.executionPolicy.readinessGuards.maxDryRunDepthRejectionRate,
+    maxDryRunLatencyRejectionRate: config.executionPolicy.readinessGuards.maxDryRunLatencyRejectionRate,
+    maxDryRunExpectedSimulatedGapRate: config.executionPolicy.readinessGuards.maxDryRunExpectedSimulatedGapRate,
+  })) {
+    validateRatio(value, `executionPolicy.readinessGuards.${name}`);
   }
 
   if (!isPlainObject(config.candidateValidation)) {
@@ -249,6 +293,16 @@ function validateRuntimeConfig(input, options = {}) {
     Number(config.candidateValidation.minNetProfitRate) < 0
   ) {
     throw new Error("candidateValidation.minNetProfitRate must be a non-negative number");
+  }
+
+  if (
+    config.candidateValidation.maxObservationValidationGapMs !== undefined &&
+    (
+      !Number.isFinite(Number(config.candidateValidation.maxObservationValidationGapMs)) ||
+      Number(config.candidateValidation.maxObservationValidationGapMs) < 0
+    )
+  ) {
+    throw new Error("candidateValidation.maxObservationValidationGapMs must be a non-negative number");
   }
 
   if (config.liveTradingEnabled && !config.runMode.startsWith("REAL_")) {
@@ -291,6 +345,7 @@ module.exports = {
   RUN_MODES,
   START_ASSETS,
   EXECUTION_MODES,
+  PARTIAL_FILL_POLICIES,
   loadRuntimeConfig,
   validateRuntimeConfig,
   freezeRuntimeConfig,

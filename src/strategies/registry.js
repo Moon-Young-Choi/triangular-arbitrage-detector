@@ -1,9 +1,10 @@
 const topOfBookBaseline = require("./topOfBookBaseline");
-const depthAwareBestIoc = require("./depthAwareBestIoc");
+const depthAwareLimitIoc = require("./depthAwareLimitIoc");
 
 class StrategyRegistry {
   constructor(strategies = []) {
     this.strategies = new Map();
+    this.aliases = new Map();
 
     strategies.forEach((strategy) => {
       this.register(strategy);
@@ -11,9 +12,15 @@ class StrategyRegistry {
   }
 
   register(strategy) {
-    for (const field of ["id", "name", "version", "description", "defaultConfig", "evaluate", "rank", "buildExecutionPlan", "explain"]) {
+    for (const field of ["id", "name", "version", "description", "defaultConfig"]) {
       if (strategy[field] === undefined) {
         throw new Error(`Strategy is missing ${field}`);
+      }
+    }
+
+    for (const field of ["evaluate", "rank", "buildExecutionPlan", "explain"]) {
+      if (typeof strategy[field] !== "function") {
+        throw new Error(`Strategy ${strategy.id || "unknown"} must implement ${field}()`);
       }
     }
 
@@ -21,11 +28,31 @@ class StrategyRegistry {
       throw new Error(`Duplicate strategy id: ${strategy.id}`);
     }
 
-    this.strategies.set(strategy.id, Object.freeze({ ...strategy }));
+    if (this.aliases.has(strategy.id)) {
+      throw new Error(`Strategy id collides with alias: ${strategy.id}`);
+    }
+
+    const aliases = Array.isArray(strategy.aliases) ? [...strategy.aliases] : [];
+    aliases.forEach((alias) => {
+      if (typeof alias !== "string" || alias.trim() === "") {
+        throw new Error(`Strategy ${strategy.id} has an invalid alias`);
+      }
+
+      if (this.strategies.has(alias) || this.aliases.has(alias)) {
+        throw new Error(`Duplicate strategy alias: ${alias}`);
+      }
+    });
+
+    const frozen = Object.freeze({ ...strategy, aliases });
+
+    this.strategies.set(strategy.id, frozen);
+    aliases.forEach((alias) => {
+      this.aliases.set(alias, strategy.id);
+    });
   }
 
   get(id) {
-    const strategy = this.strategies.get(id);
+    const strategy = this.strategies.get(id) || this.strategies.get(this.aliases.get(id));
 
     if (!strategy) {
       throw new Error(`Unknown strategy: ${id}`);
@@ -49,7 +76,7 @@ class StrategyRegistry {
 function createStrategyRegistry() {
   return new StrategyRegistry([
     topOfBookBaseline,
-    depthAwareBestIoc,
+    depthAwareLimitIoc,
   ]);
 }
 

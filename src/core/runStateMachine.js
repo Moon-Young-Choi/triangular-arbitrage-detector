@@ -90,7 +90,7 @@ class RunStateMachine {
   }
 
   stop() {
-    if (this.state === STATES.RUNNING || this.state === STATES.PAUSED) {
+    if (this.state === STATES.RUNNING || this.state === STATES.PAUSED || this.state === STATES.ERROR) {
       this.transition(STATES.STOPPING, "Stop command");
       return this.transition(STATES.STOPPED, "Engine stopped");
     }

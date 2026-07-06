@@ -10,6 +10,7 @@
   "activeStrategyId": "topOfBookBaseline",
   "executionPolicy": {
     "stopPolicy": "CANCEL_OPEN_ORDERS",
+    "partialFillPolicy": "CONTINUE_IF_ABOVE_MIN",
     "allowBestIoc": false,
     "simulatedBalances": {
       "KRW": 1000000,
@@ -41,7 +42,18 @@
       "orderChanceTtlMs": 30000,
       "accountBalanceTtlMs": 30000,
       "validationOrderbookTtlMs": 1000,
-      "orderRateLimitPerSecond": 8
+      "orderRateLimitPerSecond": 8,
+      "maxOrderAckMs": 500,
+      "maxReconciliationMs": 3000
+    },
+    "readinessGuards": {
+      "minimumDryRunSamples": 10,
+      "minimumDryRunSamplesPerStartAsset": 1,
+      "maxDryRunRejectionRate": 0.8,
+      "minimumDryRunCompleteRate": 0.5,
+      "maxDryRunDepthRejectionRate": 0.8,
+      "maxDryRunLatencyRejectionRate": 0.2,
+      "maxDryRunExpectedSimulatedGapRate": 1
     }
   },
   "candidateValidation": {
@@ -62,6 +74,7 @@
       "BTC": 0.00005,
       "USDT": 5
     },
-    "minNetProfitRate": 0
+    "minNetProfitRate": 0,
+    "maxObservationValidationGapMs": 500
   }
 }

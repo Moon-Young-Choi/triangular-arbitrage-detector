@@ -1,7 +1,17 @@
 const { pairKey } = require("./marketGraph");
-
-const HUB_RING = ["KRW", "BTC", "USDT"];
-const DEFAULT_START_ASSETS = ["KRW", "BTC", "USDT"];
+const {
+  HUB_RING,
+  buildRouteVariant,
+  buildRouteVariantsForTriangle,
+  canonicalRouteForTriangle,
+  includesAll,
+  reverseRouteForCanonicalRoute,
+  rotateClosedRouteToStart,
+} = require("../core/routeVariants");
+const {
+  DEFAULT_START_ASSETS,
+  enabledStartAssetsForTriangle,
+} = require("../core/startAssetPolicy");
 
 function hasEdge(graph, assetA, assetB) {
   return graph.has(assetA) && graph.get(assetA).has(assetB);
@@ -53,111 +63,8 @@ function findUniqueTriangles(graph, pairMap) {
   return triangles;
 }
 
-function includesAll(assets, requiredAssets) {
-  return requiredAssets.every((asset) => assets.includes(asset));
-}
-
-function canonicalRouteForTriangle(triangle) {
-  const assets = [...triangle.assets].sort();
-  const hubsInTriangle = HUB_RING.filter((hub) => assets.includes(hub));
-
-  if (hubsInTriangle.length === 3) {
-    return ["KRW", "BTC", "USDT", "KRW"];
-  }
-
-  if (hubsInTriangle.length === 2) {
-    const [thirdAsset] = assets.filter((asset) => !HUB_RING.includes(asset));
-
-    if (includesAll(assets, ["KRW", "BTC"])) {
-      return ["KRW", "BTC", thirdAsset, "KRW"];
-    }
-
-    if (includesAll(assets, ["BTC", "USDT"])) {
-      return ["BTC", "USDT", thirdAsset, "BTC"];
-    }
-
-    if (includesAll(assets, ["KRW", "USDT"])) {
-      return ["USDT", "KRW", thirdAsset, "USDT"];
-    }
-  }
-
-  return [assets[0], assets[1], assets[2], assets[0]];
-}
-
-function marketForRouteStep(fromAsset, toAsset, triangle, pairMap) {
-  const key = pairKey(fromAsset, toAsset);
-  const marketCode = pairMap ? pairMap.get(key) : triangle.edgeMarkets[key];
-
-  if (!marketCode) {
-    throw new Error(`Missing market for route step ${fromAsset} -> ${toAsset}`);
-  }
-
-  return marketCode;
-}
-
-function routeSteps(route, triangle, pairMap) {
-  const steps = [];
-
-  for (let index = 0; index < route.length - 1; index += 1) {
-    const fromAsset = route[index];
-    const toAsset = route[index + 1];
-
-    steps.push({
-      index,
-      fromAsset,
-      toAsset,
-      market: marketForRouteStep(fromAsset, toAsset, triangle, pairMap),
-    });
-  }
-
-  return steps;
-}
-
-function rotateClosedRouteToStart(route, startAsset) {
-  const openRoute = route.slice(0, -1);
-  const startIndex = openRoute.indexOf(startAsset);
-
-  if (startIndex === -1) {
-    throw new Error(`Route ${route.join(" -> ")} does not contain start asset ${startAsset}`);
-  }
-
-  return [
-    ...openRoute.slice(startIndex),
-    ...openRoute.slice(0, startIndex),
-    startAsset,
-  ];
-}
-
-function enabledStartAssetsForTriangle(triangle, enabledStartAssets = DEFAULT_START_ASSETS) {
-  return enabledStartAssets
-    .filter((asset) => triangle.assets.includes(asset));
-}
-
 function buildCycleForRoute(triangle, route, direction, pairMap) {
-  const steps = routeSteps(route, triangle, pairMap);
-  const directionLabel = direction === "canonical" ? "정방향" : "역방향";
-  const startAsset = route[0];
-  const endAsset = route[route.length - 1];
-  const routeVariantId = `${triangle.id}:${direction}:${startAsset}`;
-
-  // Reverse profitability must be calculated from the actual reverse route using live bid/ask orderbooks. It must not be inferred from 1 / canonicalMultiplier because bid/ask spread and fees break the reciprocal relationship.
-  return {
-    id: routeVariantId,
-    triangleId: triangle.id,
-    legacyCycleId: `${triangle.id}:${direction}`,
-    cycleId: routeVariantId,
-    routeVariantId,
-    direction,
-    directionLabel,
-    startAsset,
-    endAsset,
-    triangleAssets: triangle.assets,
-    assets: triangle.assets,
-    route,
-    routeLabel: route.join(" -> "),
-    markets: steps.map((step) => step.market),
-    steps,
-  };
+  return buildRouteVariant(triangle, route, direction, pairMap);
 }
 
 function buildCanonicalCycle(triangle, pairMap) {
@@ -166,26 +73,12 @@ function buildCanonicalCycle(triangle, pairMap) {
   return buildCycleForRoute(triangle, route, "canonical", pairMap);
 }
 
-function reverseRouteForCanonicalRoute(route) {
-  const reverseRoute = [route[0], route[2], route[1], route[0]];
-
-  return reverseRoute;
-}
-
 function buildDirectionalCyclesForTriangle(triangle, pairMap) {
   return buildDirectionalCycleVariantsForTriangle(triangle, pairMap);
 }
 
 function buildDirectionalCycleVariantsForTriangle(triangle, pairMap, options = {}) {
-  const canonicalRoute = canonicalRouteForTriangle(triangle);
-  const reverseRoute = reverseRouteForCanonicalRoute(canonicalRoute);
-  const enabledStartAssets = options.enabledStartAssets || DEFAULT_START_ASSETS;
-  const startAssets = enabledStartAssetsForTriangle(triangle, enabledStartAssets);
-
-  return startAssets.flatMap((startAsset) => [
-    buildCycleForRoute(triangle, rotateClosedRouteToStart(canonicalRoute, startAsset), "canonical", pairMap),
-    buildCycleForRoute(triangle, rotateClosedRouteToStart(reverseRoute, startAsset), "reverse", pairMap),
-  ]);
+  return buildRouteVariantsForTriangle(triangle, pairMap, options);
 }
 
 function buildCanonicalCycles(triangles, pairMap) {

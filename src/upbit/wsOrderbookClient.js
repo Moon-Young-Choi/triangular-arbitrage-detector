@@ -32,21 +32,27 @@ function normalizeOrderbookMessage(payload, receivedAt = Date.now(), timings = {
   }));
 
   return {
+    exchange: "upbit",
     market: payload.code || payload.market,
     askPrice: Number(unit.ask_price),
     bidPrice: Number(unit.bid_price),
     askSize: Number(unit.ask_size),
     bidSize: Number(unit.bid_size),
-    timestamp: Number(payload.timestamp),
+    timestamp: Number(payload.timestamp ?? payload.tms),
+    exchangeTimestampMs: Number(payload.timestamp ?? payload.tms),
     streamType: payload.stream_type || payload.streamType || "UNKNOWN",
+    unit: orderbookUnits.length,
     orderbookUnit: orderbookUnits.length,
+    orderbookLevel: payload.level ?? payload.orderbookLevel ?? null,
     orderbook_units: orderbookUnits,
+    orderbookUnits,
     receivedAt,
+    serverReceivedAtMs: receivedAt,
     timings: {
       ...timings,
       normalizeStartPerfNs,
       normalizeDonePerfNs: perfNowNs(),
-      upbitTimestampMs: Number(payload.timestamp || payload.tms),
+      upbitTimestampMs: Number(payload.timestamp ?? payload.tms),
     },
   };
 }

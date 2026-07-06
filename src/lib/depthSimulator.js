@@ -1,4 +1,5 @@
 const { parseMarket } = require("./marketGraph");
+const { REJECTION_REASONS } = require("../core/rejectionReasons");
 
 function normalizeUnits(orderbook) {
   return (orderbook && Array.isArray(orderbook.orderbook_units) ? orderbook.orderbook_units : [])
@@ -19,7 +20,7 @@ function normalizeUnits(orderbook) {
 function insufficientDepth(partial = {}) {
   return {
     available: false,
-    rejectionCode: "DEPTH_INSUFFICIENT",
+    rejectionCode: REJECTION_REASONS.DEPTH_INSUFFICIENT,
     outputAmount: null,
     expectedSlippageBps: null,
     ...partial,
@@ -153,6 +154,47 @@ function orderbookForMarket(orderbooks, market) {
   return orderbooks instanceof Map ? orderbooks.get(market) : orderbooks[market];
 }
 
+function policyForMarket(feePolicyByMarket, market) {
+  if (!feePolicyByMarket) return null;
+  if (feePolicyByMarket instanceof Map) return feePolicyByMarket.get(market) || null;
+  return feePolicyByMarket[market] || null;
+}
+
+function feeFromPolicy(policy, side, options = {}) {
+  if (!policy) return null;
+  const maker = options.expectedMaker === true || options.maker === true;
+  const value = side === "bid"
+    ? (maker ? policy.makerBidFee : policy.bidFee)
+    : (maker ? policy.makerAskFee : policy.askFee);
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function resolveLegFeeRate(step, side, fallbackFeeRate, options = {}) {
+  if (typeof options.resolveLegFee === "function") {
+    const resolved = Number(options.resolveLegFee({
+      market: step.market,
+      side,
+      orderType: options.orderType || "limit",
+      timeInForce: options.timeInForce || "ioc",
+      expectedMaker: options.expectedMaker === true,
+      step,
+    }));
+
+    if (Number.isFinite(resolved)) {
+      return resolved;
+    }
+  }
+
+  const policyFee = feeFromPolicy(policyForMarket(options.feePolicyByMarket, step.market), side, options);
+
+  if (policyFee !== null) {
+    return policyFee;
+  }
+
+  return Number(fallbackFeeRate || 0);
+}
+
 function orderbookTimestamp(orderbook) {
   const timestamp = Number(orderbook && (orderbook.timestamp || orderbook.tms));
 
@@ -170,7 +212,7 @@ function simulateCycleWithDepth(cycle, orderbooks, startAmount, feeRate = 0, opt
     if (!orderbook) {
       return {
         available: false,
-        rejectionCode: "DEPTH_INSUFFICIENT",
+        rejectionCode: REJECTION_REASONS.DEPTH_INSUFFICIENT,
         rejectionReason: `Missing validation orderbook for ${step.market}`,
         outputAmount: null,
         profitRate: null,
@@ -185,7 +227,7 @@ function simulateCycleWithDepth(cycle, orderbooks, startAmount, feeRate = 0, opt
     ) {
       return {
         available: false,
-        rejectionCode: "STALE_ORDERBOOK",
+        rejectionCode: REJECTION_REASONS.STALE_ORDERBOOK,
         rejectionReason: `Stale validation orderbook for ${step.market}`,
         outputAmount: null,
         profitRate: null,
@@ -196,14 +238,21 @@ function simulateCycleWithDepth(cycle, orderbooks, startAmount, feeRate = 0, opt
     const { quote, base } = parseMarket(step.market);
     let simulated;
 
+    let feeSide;
+    let legFeeRate;
+
     if (step.fromAsset === quote && step.toAsset === base) {
-      simulated = simulateBuyWithQuote(orderbook, amount, feeRate);
+      feeSide = "bid";
+      legFeeRate = resolveLegFeeRate(step, feeSide, feeRate, options);
+      simulated = simulateBuyWithQuote(orderbook, amount, legFeeRate);
     } else if (step.fromAsset === base && step.toAsset === quote) {
-      simulated = simulateSellBaseForQuote(orderbook, amount, feeRate);
+      feeSide = "ask";
+      legFeeRate = resolveLegFeeRate(step, feeSide, feeRate, options);
+      simulated = simulateSellBaseForQuote(orderbook, amount, legFeeRate);
     } else {
       return {
         available: false,
-        rejectionCode: "DEPTH_INSUFFICIENT",
+        rejectionCode: REJECTION_REASONS.DEPTH_INSUFFICIENT,
         rejectionReason: `Market ${step.market} cannot convert ${step.fromAsset} -> ${step.toAsset}`,
         outputAmount: null,
         profitRate: null,
@@ -221,6 +270,8 @@ function simulateCycleWithDepth(cycle, orderbooks, startAmount, feeRate = 0, opt
       outputAmount: simulated.outputAmount,
       action: simulated.action,
       usedSide: simulated.usedSide,
+      feeSide,
+      feeRate: legFeeRate,
       averagePrice: simulated.averagePrice,
       bestPrice: simulated.bestPrice,
       expectedSlippageBps: simulated.expectedSlippageBps,
@@ -266,4 +317,5 @@ module.exports = {
   simulateBuyWithQuote,
   simulateSellBaseForQuote,
   simulateCycleWithDepth,
+  resolveLegFeeRate,
 };

@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const { buildExecutionPlan } = require("../execution/executionPlan");
 
 const strategy = {
   id: "topOfBookBaseline",
@@ -20,6 +21,7 @@ const strategy = {
     if (row.status !== "available") {
       return {
         strategyId: this.id,
+        strategyVersion: this.version,
         accepted: false,
         reason: row.unavailableReason || row.staleReason || "ORDERBOOK_UNAVAILABLE",
       };
@@ -28,6 +30,7 @@ const strategy = {
     if (!(row.netProfitRate > minNetProfitRate)) {
       return {
         strategyId: this.id,
+        strategyVersion: this.version,
         accepted: false,
         reason: "PROFIT_BELOW_THRESHOLD",
       };
@@ -35,6 +38,7 @@ const strategy = {
 
     return {
       strategyId: this.id,
+      strategyVersion: this.version,
       accepted: true,
       reason: "TOP_OF_BOOK_PROFITABLE",
     };
@@ -49,8 +53,29 @@ const strategy = {
     });
   },
 
-  buildExecutionPlan() {
-    return null;
+  buildExecutionPlan(context = {}) {
+    const decision = context.decision || this.evaluate(context);
+    const row = context.row || {};
+    const validation = context.depthValidation || {};
+
+    if (!decision.accepted) {
+      return null;
+    }
+
+    if (validation.validationStatus !== "accepted" && row.validationStatus !== "accepted") {
+      return null;
+    }
+
+    return buildExecutionPlan({
+      ...context,
+      row: {
+        ...row,
+        strategyId: decision.strategyId,
+        strategyVersion: decision.strategyVersion,
+        strategyAccepted: decision.accepted,
+        strategyReason: decision.reason,
+      },
+    });
   },
 
   explain(decision) {

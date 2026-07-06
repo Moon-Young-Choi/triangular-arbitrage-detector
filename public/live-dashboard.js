@@ -24,6 +24,7 @@
   const strategyList = document.getElementById("strategyList");
   const logTable = document.getElementById("logTable");
   const dryRunSummaryCards = document.getElementById("dryRunSummaryCards");
+  const dryRunStartAssetTable = document.getElementById("dryRunStartAssetTable");
   const logModeFilter = document.getElementById("logModeFilter");
   const logTypeFilter = document.getElementById("logTypeFilter");
   const logStartAssetFilter = document.getElementById("logStartAssetFilter");
@@ -39,16 +40,26 @@
   const realGuardedButton = document.getElementById("realGuardedButton");
   const pauseButton = document.getElementById("pauseButton");
   const stopButton = document.getElementById("stopButton");
-  const emergencyStopButton = document.getElementById("emergencyStopButton");
   const unpinButton = document.getElementById("unpinButton");
-  const feeInput = document.getElementById("feeInput");
-  const staleInput = document.getElementById("staleInput");
   const autoScaleInput = document.getElementById("autoScaleInput");
   const showUnavailableInput = document.getElementById("showUnavailableInput");
   const groupFilters = document.getElementById("groupFilters");
   const toast = document.getElementById("toast");
   const tabButtons = [...document.querySelectorAll("[data-tab-target]")];
   const tabPanels = [...document.querySelectorAll("[data-tab-panel]")];
+  const fallbackTabDefinitions = [
+    { id: "market", label: "Market", panelId: "tab-market" },
+    { id: "strategy", label: "Strategy", panelId: "tab-strategy" },
+    { id: "arbitrage", label: "Arbitrage Desk", panelId: "tab-arbitrage" },
+    { id: "execution", label: "Execution", panelId: "tab-execution" },
+    { id: "system", label: "System", panelId: "tab-system" },
+    { id: "logs", label: "Logs", panelId: "tab-logs" },
+    { id: "settings", label: "Settings", panelId: "tab-settings" },
+  ];
+  const tabDefinitions = window.QGagarinDashboardTabs && typeof window.QGagarinDashboardTabs.all === "function"
+    ? window.QGagarinDashboardTabs.all()
+    : fallbackTabDefinitions;
+  const tabIds = new Set(tabDefinitions.map((definition) => definition.id));
 
   let latestState = null;
   let chartRows = [];
@@ -77,6 +88,34 @@
   let pendingCommandId = null;
   let pendingCommandTimer = null;
   const enabledGroups = new Set(["KRW_START", "BTC_START", "USDT_START"]);
+
+  function validateTabRegistry() {
+    const missing = [];
+
+    tabDefinitions.forEach((definition) => {
+      const button = tabButtons.find((item) => item.dataset.tabTarget === definition.id);
+      const panel = tabPanels.find((item) => item.dataset.tabPanel === definition.id);
+
+      if (!button) missing.push(`button:${definition.id}`);
+      if (!panel) missing.push(`panel:${definition.id}`);
+
+      (definition.requiredElements || []).forEach((elementId) => {
+        if (!document.getElementById(elementId)) {
+          missing.push(`element:${definition.id}:${elementId}`);
+        }
+      });
+    });
+
+    tabButtons.forEach((button) => {
+      if (!tabIds.has(button.dataset.tabTarget)) {
+        missing.push(`unregistered-button:${button.dataset.tabTarget}`);
+      }
+    });
+
+    if (missing.length > 0) {
+      console.warn(`Dashboard tab registry mismatch: ${missing.join(", ")}`);
+    }
+  }
 
   function parseNumber(value, fallback) {
     const parsed = Number.parseFloat(value);
@@ -120,7 +159,9 @@
   }
 
   function formatPercent(value) {
-    return value === null || value === undefined ? "n/a" : `${(Number(value) * 100).toFixed(4)}%`;
+    return value === null || value === undefined || !Number.isFinite(Number(value))
+      ? "n/a"
+      : `${(Number(value) * 100).toFixed(4)}%`;
   }
 
   function formatMs(value) {
@@ -134,18 +175,30 @@
     return `${mib.toFixed(1)} MiB`;
   }
 
+  function formatAssetAmounts(amounts, options = {}) {
+    const positiveOnly = options.positiveOnly === true;
+    const entries = Object.entries(amounts || {})
+      .filter(([asset, value]) => (
+        asset &&
+        Number.isFinite(Number(value)) &&
+        (!positiveOnly || Number(value) > 0)
+      ))
+      .sort(([assetA], [assetB]) => {
+        const preferred = ["KRW", "BTC", "USDT"];
+        const indexA = preferred.includes(assetA) ? preferred.indexOf(assetA) : preferred.length;
+        const indexB = preferred.includes(assetB) ? preferred.indexOf(assetB) : preferred.length;
+        return indexA === indexB ? assetA.localeCompare(assetB) : indexA - indexB;
+      });
+
+    return entries.length > 0
+      ? entries.map(([asset, value]) => `${asset} ${formatNumber(value, 8)}`).join(" / ")
+      : "n/a";
+  }
+
   function formatTime(value) {
     if (!value) return "n/a";
     const date = typeof value === "number" ? new Date(value) : new Date(value);
     return Number.isNaN(date.getTime()) ? "n/a" : date.toLocaleString();
-  }
-
-  function formatLocalTimestamp(date = new Date()) {
-    const pad = (value) => String(value).padStart(2, "0");
-    return (
-      `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-` +
-      `${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
-    );
   }
 
   function showToast(message) {
@@ -169,8 +222,30 @@
     return `<div class="status-row"><strong>${escapeHtml(label)}</strong>${valueHtml}</div>`;
   }
 
+  function formatConfigValue(value) {
+    if (Array.isArray(value)) return value.join(", ");
+    if (value && typeof value === "object") return JSON.stringify(value);
+    return value;
+  }
+
   function runtimeConfig() {
     return (latestState && latestState.runtimeConfig) || {};
+  }
+
+  function stateSummary() {
+    return (latestState && latestState.summary) || {};
+  }
+
+  function readModelFeeRate() {
+    return parseNumber(stateSummary().feeRate, 0);
+  }
+
+  function readModelStaleThresholdMs() {
+    return parseNumber(stateSummary().staleOrderbookMs, 3000);
+  }
+
+  function readModelFeeMetrics() {
+    return feeMetrics(readModelFeeRate());
   }
 
   function engineState() {
@@ -207,26 +282,64 @@
       : "";
     pauseButton.disabled = pending || !running;
     stopButton.disabled = pending || !(running || paused);
-    emergencyStopButton.disabled = pending || !(running || paused || state === "ERROR");
   }
 
   function renderConfigTable(config) {
     const rows = Object.entries(config || {})
       .map(([key, value]) => (
-        `<tr><th>${escapeHtml(key)}</th><td>${escapeHtml(Array.isArray(value) ? value.join(", ") : value)}</td></tr>`
+        `<tr><th>${escapeHtml(key)}</th><td>${escapeHtml(formatConfigValue(value))}</td></tr>`
       ))
       .join("");
 
     const readiness = latestState && latestState.readiness;
+    const score = readiness && readiness.score;
+    const scoreText = score
+      ? `${score.passed}/${score.total} (${formatPercent(score.rate)})`
+      : "n/a";
+    const readinessSummaryRows = [
+      statusRow("Readiness score", scoreText, readiness && readiness.passed ? "ok" : "off"),
+      statusRow("Failed checks", score ? score.failed : "n/a", score && score.failed === 0 ? "ok" : "off"),
+    ].join("");
     const readinessRows = readiness && Array.isArray(readiness.items)
       ? readiness.items.map((entry) => statusRow(entry.label, entry.passed ? "PASS" : "FAIL", entry.passed ? "ok" : "off")).join("")
       : statusRow("Readiness", "n/a");
+    const startAssetSummaries = readiness && readiness.dryRunStartAssetSummaries || {};
+    const startAssetRows = Object.entries(startAssetSummaries)
+      .sort(([leftAsset], [rightAsset]) => {
+        const preferred = ["KRW", "BTC", "USDT"];
+        const leftIndex = preferred.includes(leftAsset) ? preferred.indexOf(leftAsset) : preferred.length;
+        const rightIndex = preferred.includes(rightAsset) ? preferred.indexOf(rightAsset) : preferred.length;
+        return leftIndex === rightIndex
+          ? String(leftAsset).localeCompare(String(rightAsset))
+          : leftIndex - rightIndex;
+      })
+      .map(([asset, summary]) => {
+        const gateItems = readiness && Array.isArray(readiness.items)
+          ? readiness.items.filter((entry) => entry.startAsset === asset)
+          : [];
+        const gatePassed = gateItems.length > 0 && gateItems.every((entry) => entry.passed);
+        return (
+          `<tr><td>${escapeHtml(asset)}</td>` +
+          `<td>${escapeHtml(gatePassed ? "PASS" : "FAIL")}</td>` +
+          `<td>${escapeHtml(summary.totalOpportunities || 0)}</td>` +
+          `<td>${escapeHtml(summary.simulatedAttemptCycles || 0)}</td>` +
+          `<td>${escapeHtml(formatPercent(summary.simulatedCompleteRate))}</td>` +
+          `<td>${escapeHtml(formatPercent(summary.depthRejectionRate))}</td>` +
+          `<td>${escapeHtml(formatPercent(summary.latencyRejectionRate))}</td>` +
+          `<td>${escapeHtml(formatPercent(summary.expectedSimulatedGapRate))}</td></tr>`
+        );
+      })
+      .join("");
 
     settingsConfig.innerHTML = (
       (rows
         ? `<div class="detail-section"><div class="detail-title">Runtime config</div><div class="table-wrap"><table><tbody>${rows}</tbody></table></div></div>`
         : "<div class=\"status-list wide\"><div class=\"status-row\"><strong>Runtime config</strong><span>n/a</span></div></div>") +
-      `<div class="detail-section"><div class="detail-title">Real-run readiness</div><div class="status-list wide">${readinessRows}</div></div>`
+      `<div class="detail-section"><div class="detail-title">Real-run readiness</div><div class="status-list wide">${readinessSummaryRows}${readinessRows}</div></div>` +
+      `<div class="detail-section"><div class="detail-title">Readiness by start asset</div>` +
+      `<div class="table-wrap"><table><thead><tr>` +
+      `<th>Start</th><th>Gate</th><th>Opportunities</th><th>Attempts</th><th>Complete rate</th><th>Depth reject</th><th>Latency reject</th><th>Expected gap</th>` +
+      `</tr></thead><tbody>${startAssetRows || "<tr><td colspan=\"8\">n/a</td></tr>"}</tbody></table></div></div>`
     );
   }
 
@@ -249,6 +362,43 @@
     const feedStatus = latestState.feedStatus || {};
     const observationFeed = feedStatus.observation || latestState.wsStatus || {};
     const validationFeed = feedStatus.validation || {};
+    const dryRunCapitalBuckets = latestState.execution &&
+      latestState.execution.dryRunCapital &&
+      latestState.execution.dryRunCapital.buckets;
+    const dryRunCapitalText = dryRunCapitalBuckets
+      ? Object.values(dryRunCapitalBuckets)
+        .map((bucket) => (
+          `${bucket.startAsset} a:${formatNumber(bucket.availableBalance, 8)} ` +
+          `r:${formatNumber(bucket.reservedBalance, 8)} ` +
+          `x:${formatNumber(bucket.residualBalance, 8)}`
+        ))
+        .join(" / ")
+      : "n/a";
+    const realAccounts = latestState.execution &&
+      latestState.execution.realBalances &&
+      latestState.execution.realBalances.accounts;
+    const realLockedBalances = latestState.execution &&
+      latestState.execution.realBalances &&
+      latestState.execution.realBalances.lockedBalances;
+    const residualBalances = latestState.execution &&
+      latestState.execution.realBalances &&
+      latestState.execution.realBalances.residualBalances;
+    const realBalanceText = realAccounts
+      ? Object.values(realAccounts)
+        .filter((account) => ["KRW", "BTC", "USDT"].includes(account.asset))
+        .map((account) => (
+          `${account.asset} a:${formatNumber(account.availableBalance, 8)} ` +
+          `l:${formatNumber(account.lockedBalance, 8)}`
+        ))
+        .join(" / ")
+      : "n/a";
+    const dailyLossByAsset = latestState.realRunLimits && latestState.realRunLimits.dailyLossByAsset;
+    const dailyLossText = dailyLossByAsset
+      ? Object.entries(dailyLossByAsset).map(([asset, value]) => `${asset} ${formatNumber(value, 8)}`).join(" / ")
+      : "n/a";
+    const emergencyStop = latestState.emergencyStop || {};
+    const performanceBudget = latestState.performanceBudget || {};
+    const executionBudget = performanceBudget.execution || {};
 
     marketConfigCards.innerHTML = [
       statusRow("Exchange", config.exchange || "upbit"),
@@ -265,7 +415,7 @@
       statusRow("Validation latency", formatMs(validation.averageLatencyMs)),
       statusRow("Fee rate", String(metrics.feeRate)),
       statusRow("Break-even", formatNumber(metrics.executableBreakEvenGross)),
-      statusRow("Stale threshold", `${summary.staleOrderbookMs || staleInput.value} ms`),
+      statusRow("Stale threshold", `${readModelStaleThresholdMs()} ms`),
       statusRow("Required markets", summary.requiredMarketCount || "n/a"),
     ].join("");
 
@@ -275,10 +425,15 @@
       statusRow("Run mode", config.runMode || "OBSERVE"),
       statusRow("Execution mode", config.executionMode || "LIMIT_IOC_AT_OBSERVED_BEST"),
       statusRow("Live trading", config.liveTradingEnabled ? "Enabled" : "Disabled", config.liveTradingEnabled ? "" : "off"),
+      statusRow("Emergency stop", emergencyStop.active ? (emergencyStop.reason || "Active") : "Inactive", emergencyStop.active ? "off" : "ok"),
       statusRow("Guard healthy", latestState.guardStatus && latestState.guardStatus.healthy ? "Yes" : "No", latestState.guardStatus && latestState.guardStatus.healthy ? "ok" : "off"),
       statusRow("Consecutive failures", latestState.guardStatus ? latestState.guardStatus.consecutiveFailures : "n/a"),
       statusRow("Open orders guard", latestState.guardStatus ? `${latestState.guardStatus.openOrderCount}/${latestState.guardStatus.maxOpenOrders}` : "n/a"),
       statusRow("Active real executions", latestState.guardStatus ? latestState.guardStatus.activeRealExecutionCount : "n/a"),
+      statusRow("Daily loss", dailyLossText),
+      statusRow("Order ack budget", formatMs(executionBudget.maxOrderAckMs)),
+      statusRow("Reconcile budget", formatMs(executionBudget.maxReconciliationMs)),
+      statusRow("Dashboard latency guard", performanceBudget.dashboardLatencyAffectsTrading ? "Trading input" : "Display only", performanceBudget.dashboardLatencyAffectsTrading ? "off" : "ok"),
       statusRow("Readiness", latestState.readiness ? (latestState.readiness.passed ? "PASS" : "FAIL") : "n/a", latestState.readiness && latestState.readiness.passed ? "ok" : "off"),
       statusRow(
         "Dry-run balances",
@@ -286,6 +441,10 @@
           ? Object.entries(latestState.execution.dryRunBalances).map(([asset, value]) => `${asset} ${value}`).join(" / ")
           : "n/a",
       ),
+      statusRow("Dry-run capital", dryRunCapitalText),
+      statusRow("Real balances", realBalanceText || "n/a"),
+      statusRow("Locked balances", formatAssetAmounts(realLockedBalances)),
+      statusRow("Residual assets", formatAssetAmounts(residualBalances, { positiveOnly: true })),
       statusRow("Private WS", latestState.privateWsStatus ? latestState.privateWsStatus.status : "not configured"),
       statusRow("Order chance cache", privateCache.orderChanceFresh ? "Fresh" : "Stale", privateCache.orderChanceFresh ? "ok" : "off"),
       statusRow("Account balance cache", privateCache.accountBalanceFresh ? "Fresh" : "Stale", privateCache.accountBalanceFresh ? "ok" : "off"),
@@ -309,6 +468,30 @@
     const execution = latestState.execution || {};
     const orders = (execution.orders || []).filter((row) => row.mode !== "DRY_RUN").slice(-30).reverse();
     const fills = (execution.fills || []).filter((row) => row.mode !== "DRY_RUN").slice(-30).reverse();
+    const realRunByStartAsset = latestState.realRunLimits && latestState.realRunLimits.summaryByStartAsset;
+    const residualEvents = execution.realBalances && Array.isArray(execution.realBalances.residualEvents)
+      ? execution.realBalances.residualEvents.slice(-30).reverse()
+      : [];
+    const realRunSummaryRows = Object.values(realRunByStartAsset || {})
+      .sort((left, right) => {
+        const preferred = ["KRW", "BTC", "USDT"];
+        const leftIndex = preferred.includes(left.startAsset) ? preferred.indexOf(left.startAsset) : preferred.length;
+        const rightIndex = preferred.includes(right.startAsset) ? preferred.indexOf(right.startAsset) : preferred.length;
+        return leftIndex === rightIndex
+          ? String(left.startAsset).localeCompare(String(right.startAsset))
+          : leftIndex - rightIndex;
+      })
+      .map((row) => (
+        `<tr><td>${escapeHtml(row.startAsset || "n/a")}</td>` +
+        `<td>${escapeHtml(row.cycles || 0)}</td>` +
+        `<td>${escapeHtml(formatNumber(row.totalPnl, 8))}</td>` +
+        `<td>${escapeHtml(formatNumber(row.dailyLoss, 8))}</td>` +
+        `<td>${escapeHtml(formatNumber(row.realizedLoss, 8))}</td>` +
+        `<td>${escapeHtml(formatNumber(row.totalPaidFee, 8))}</td>` +
+        `<td>${escapeHtml(formatNumber(row.totalTradeFee, 8))}</td>` +
+        `<td>${escapeHtml(formatTime(row.lastCycleAt))}</td></tr>`
+      ))
+      .join("");
 
     const orderRows = orders.map((row) => (
       `<tr><td>${escapeHtml(row.uuid || row.identifier || "n/a")}</td>` +
@@ -318,24 +501,45 @@
       `<td>${escapeHtml(formatNumber(row.price, 8))}</td>` +
       `<td>${escapeHtml(formatNumber(row.remainingVolume, 8))}</td></tr>`
     )).join("");
-    const fillRows = fills.map((row) => (
-      `<tr><td>${escapeHtml(row.uuid || row.identifier || "n/a")}</td>` +
-      `<td>${escapeHtml(row.market || "n/a")}</td>` +
-      `<td>${escapeHtml(formatNumber(row.executedVolume, 8))}</td>` +
-      `<td>${escapeHtml(formatNumber(row.paidFee, 8))}</td>` +
-      `<td>${escapeHtml(formatNumber(row.tradeFee, 8))}</td>` +
-      `<td>${escapeHtml(formatTime(row.tradeTimestamp || row.eventTimestamp))}</td></tr>`
+    const fillRows = fills.map((row) => {
+      const latency = row.executionLatency || {};
+      return (
+        `<tr><td>${escapeHtml(row.uuid || row.identifier || "n/a")}</td>` +
+        `<td>${escapeHtml(row.market || "n/a")}</td>` +
+        `<td>${escapeHtml(formatNumber(row.executedVolume, 8))}</td>` +
+        `<td>${escapeHtml(formatNumber(row.paidFee, 8))}</td>` +
+        `<td>${escapeHtml(formatNumber(row.tradeFee, 8))}</td>` +
+        `<td>${escapeHtml(formatMs(latency.orderAckMs))}</td>` +
+        `<td>${escapeHtml(formatMs(latency.reconciliationMs))}</td>` +
+        `<td>${escapeHtml(formatTime(row.tradeTimestamp || row.eventTimestamp))}</td></tr>`
+      );
+    }).join("");
+    const residualRows = residualEvents.map((row) => (
+      `<tr><td>${escapeHtml(formatTime(row.recordedAt))}</td>` +
+      `<td>${escapeHtml(row.asset || "n/a")}</td>` +
+      `<td>${escapeHtml(formatNumber(row.amount, 8))}</td>` +
+      `<td>${escapeHtml(formatNumber(row.balance, 8))}</td>` +
+      `<td>${escapeHtml(row.reason || "n/a")}</td>` +
+      `<td>${escapeHtml(row.cycleId || row.planId || "n/a")}</td></tr>`
     )).join("");
 
     realRunTables.innerHTML = (
+      `<div class="detail-section"><div class="detail-title">Real-run by start asset</div>` +
+      `<div class="table-wrap"><table><thead><tr>` +
+      `<th>Start</th><th>Cycles</th><th>PnL</th><th>Daily loss</th><th>Realized loss</th><th>Paid fee</th><th>Trade fee</th><th>Last cycle</th>` +
+      `</tr></thead><tbody>${realRunSummaryRows || "<tr><td colspan=\"8\">n/a</td></tr>"}</tbody></table></div></div>` +
       `<div class="detail-section"><div class="detail-title">Latest real-run orders</div>` +
       `<div class="table-wrap"><table><thead><tr>` +
       `<th>UUID/Identifier</th><th>Market</th><th>Side</th><th>State</th><th>Price</th><th>Remaining</th>` +
       `</tr></thead><tbody>${orderRows || "<tr><td colspan=\"6\">n/a</td></tr>"}</tbody></table></div></div>` +
       `<div class="detail-section"><div class="detail-title">Latest real-run fills</div>` +
       `<div class="table-wrap"><table><thead><tr>` +
-      `<th>UUID/Identifier</th><th>Market</th><th>Executed</th><th>Paid fee</th><th>Trade fee</th><th>Time</th>` +
-      `</tr></thead><tbody>${fillRows || "<tr><td colspan=\"6\">n/a</td></tr>"}</tbody></table></div></div>`
+      `<th>UUID/Identifier</th><th>Market</th><th>Executed</th><th>Paid fee</th><th>Trade fee</th><th>Ack</th><th>Reconcile</th><th>Time</th>` +
+      `</tr></thead><tbody>${fillRows || "<tr><td colspan=\"8\">n/a</td></tr>"}</tbody></table></div></div>` +
+      `<div class="detail-section"><div class="detail-title">Residual position ledger</div>` +
+      `<div class="table-wrap"><table><thead><tr>` +
+      `<th>Time</th><th>Asset</th><th>Amount</th><th>Balance</th><th>Reason</th><th>Cycle/Plan</th>` +
+      `</tr></thead><tbody>${residualRows || "<tr><td colspan=\"6\">n/a</td></tr>"}</tbody></table></div></div>`
     );
   }
 
@@ -390,9 +594,54 @@
     );
   }
 
+  function sortedDryRunGroupRows(groups, preferred = []) {
+    return Object.values(groups || {}).sort((left, right) => {
+      const leftSortOrder = Number(left.sortOrder);
+      const rightSortOrder = Number(right.sortOrder);
+      if (Number.isFinite(leftSortOrder) && Number.isFinite(rightSortOrder) && leftSortOrder !== rightSortOrder) {
+        return leftSortOrder - rightSortOrder;
+      }
+
+      const leftIndex = preferred.includes(left.id) ? preferred.indexOf(left.id) : preferred.length;
+      const rightIndex = preferred.includes(right.id) ? preferred.indexOf(right.id) : preferred.length;
+      return leftIndex === rightIndex
+        ? String(left.id).localeCompare(String(right.id))
+        : leftIndex - rightIndex;
+    });
+  }
+
+  function dryRunGroupTable(title, firstHeader, groups, options = {}) {
+    const preferred = options.preferred || [];
+    const fallback = options.fallback || "n/a";
+    const rows = sortedDryRunGroupRows(groups, preferred)
+      .map((row) => {
+        const attempts = Number(row.simulatedCompleteCycles || 0) + Number(row.simulatedFailedCycles || 0);
+        const completeRate = attempts > 0 ? Number(row.simulatedCompleteCycles || 0) / attempts : 0;
+        return (
+          `<tr><td>${escapeHtml(row.id || fallback)}</td>` +
+          `<td>${escapeHtml(row.opportunities || 0)}</td>` +
+          `<td>${escapeHtml(row.accepted || 0)}</td>` +
+          `<td>${escapeHtml(row.rejected || 0)}</td>` +
+          `<td>${escapeHtml(row.simulatedCompleteCycles || 0)}</td>` +
+          `<td>${escapeHtml(row.simulatedFailedCycles || 0)}</td>` +
+          `<td>${escapeHtml(formatPercent(completeRate))}</td>` +
+          `<td>${escapeHtml(formatNumber(row.simulatedNetProfit, 8))}</td></tr>`
+        );
+      })
+      .join("");
+
+    return (
+      `<div class="detail-section"><div class="detail-title">${escapeHtml(title)}</div>` +
+      `<div class="table-wrap"><table><thead><tr>` +
+      `<th>${escapeHtml(firstHeader)}</th><th>Opportunities</th><th>Accepted</th><th>Rejected</th><th>Sim done</th><th>Sim failed</th><th>Complete rate</th><th>Sim net</th>` +
+      `</tr></thead><tbody>${rows || "<tr><td colspan=\"8\">n/a</td></tr>"}</tbody></table></div></div>`
+    );
+  }
+
   function updateDryRunSummary(summary) {
     if (!summary) {
       dryRunSummaryCards.innerHTML = "";
+      dryRunStartAssetTable.innerHTML = "";
       return;
     }
 
@@ -402,10 +651,30 @@
       metric("Rejected", summary.rejected),
       metric("Sim done", summary.simulatedCompleteCycles),
       metric("Sim failed", summary.simulatedFailedCycles),
+      metric("Complete rate", formatPercent(summary.simulatedCompleteRate)),
+      metric("Depth reject", formatPercent(summary.depthRejectionRate)),
+      metric("Latency reject", formatPercent(summary.latencyRejectionRate)),
       metric("Expected net", formatNumber(summary.expectedNetProfit, 8)),
       metric("Sim net", formatNumber(summary.simulatedNetProfit, 8)),
+      metric("Expected gap", formatPercent(summary.expectedSimulatedGapRate)),
       metric("Latency p95", formatMs(summary.latencyDistribution && summary.latencyDistribution.p95Ms)),
+      metric("Best touch p95", formatPercent(summary.bestLevelTouchRatioDistribution && summary.bestLevelTouchRatioDistribution.p95)),
+      metric("Review period", summary.period && summary.period.from && summary.period.to
+        ? `${formatTime(summary.period.from)} - ${formatTime(summary.period.to)}`
+        : "n/a"),
     ].join("");
+
+    const byStartAsset = summary.byStartAsset || {};
+    const byMarketState = summary.byMarketState || {};
+    const byLatencyBand = summary.byLatencyBand || {};
+    const byBestLevelTouchRatio = summary.byBestLevelTouchRatio || {};
+
+    dryRunStartAssetTable.innerHTML = (
+      dryRunGroupTable("Dry-run by start asset", "Start", byStartAsset, { preferred: ["KRW", "BTC", "USDT"] }) +
+      dryRunGroupTable("Dry-run by market state", "State", byMarketState, { fallback: "unknown" }) +
+      dryRunGroupTable("Dry-run by latency", "Latency", byLatencyBand, { fallback: "unknown" }) +
+      dryRunGroupTable("Dry-run by best-level touch", "Best touch", byBestLevelTouchRatio, { fallback: "unknown" })
+    );
   }
 
   function logQueryParams() {
@@ -420,7 +689,7 @@
   }
 
   async function refreshLogs() {
-    const response = await fetch(`/api/logs?${logQueryParams().toString()}`);
+    const response = await fetch(`/api/dashboard/logs?${logQueryParams().toString()}`);
     const payload = await response.json();
 
     if (!response.ok || !payload.ok) {
@@ -430,7 +699,7 @@
     cachedLogRows = payload.logs || [];
     updateLogPanel();
 
-    const report = await fetch("/api/dry-run-report?limit=5000").then((item) => item.json());
+    const report = await fetch("/api/dashboard/dry-run-report?limit=5000").then((item) => item.json());
     updateDryRunSummary(report.summary);
   }
 
@@ -443,7 +712,7 @@
   }
 
   async function exportDryRun(format) {
-    const response = await fetch(`/api/dry-run-report?format=${format}`);
+    const response = await fetch(`/api/dashboard/dry-run-report?format=${format}`);
     const blob = await response.blob();
     downloadBlob(blob, `dry-run-report.${format}`);
   }
@@ -490,8 +759,8 @@
   }
 
   function decorateRow(row) {
-    const metrics = feeMetrics(parseNumber(feeInput.value, 0));
-    const staleThresholdMs = parseNumber(staleInput.value, 3000);
+    const metrics = readModelFeeMetrics();
+    const staleThresholdMs = readModelStaleThresholdMs();
     const gross = row.grossMultiplier;
     const net = gross === null ? null : gross * metrics.feeFactor;
     const statusClass = classify({ ...row, grossMultiplier: gross }, metrics, staleThresholdMs);
@@ -565,7 +834,7 @@
     if (!latestState) return;
     const available = rows.filter((row) => row.statusClass !== "unavailable").length;
     const unavailable = rows.length - available;
-    const metrics = feeMetrics(parseNumber(feeInput.value, 0));
+    const metrics = readModelFeeMetrics();
     const ws = latestState.wsStatus || {};
     const wsLabel = `${ws.openConnectionCount || 0}/${ws.connectionCount || 0} open`;
     updateExchangeCards();
@@ -761,7 +1030,7 @@
   function renderChart() {
     if (!latestState) return;
 
-    const metrics = feeMetrics(parseNumber(feeInput.value, 0));
+    const metrics = readModelFeeMetrics();
     chartRows = visibleDecoratedRows();
     rebuildPointIndex();
     updateSummary(chartRows);
@@ -1060,11 +1329,6 @@
       };
     });
     rebuildStateIndex();
-    if (!feeInput.dataset.initialized) {
-      feeInput.value = String(state.summary.feeRate || 0);
-      staleInput.value = String(state.summary.staleOrderbookMs || 3000);
-      feeInput.dataset.initialized = "true";
-    }
     renderGroupFilters();
     renderChart();
     bindPlotlyEvents();
@@ -1329,7 +1593,7 @@
   }
 
   async function fetchFullState() {
-    const response = await fetch("/api/state");
+    const response = await fetch("/api/dashboard/snapshot");
     applyState(await response.json());
   }
 
@@ -1372,10 +1636,10 @@
   }
 
   async function sendEngineCommand(command, options = {}) {
-    const response = await fetch("/api/command", {
+    const response = await fetch(`/api/command/${encodeURIComponent(command.toLowerCase())}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ command, ...options }),
+      body: JSON.stringify(options),
     });
     const result = await response.json();
 
@@ -1393,6 +1657,11 @@
   }
 
   function activateTab(tabName) {
+    if (!tabIds.has(tabName)) {
+      showToast(`Unknown dashboard tab: ${tabName}`);
+      return;
+    }
+
     tabButtons.forEach((button) => {
       const active = button.dataset.tabTarget === tabName;
       button.classList.toggle("active", active);
@@ -1419,81 +1688,12 @@
     }
   }
 
-  async function capture() {
-    if (!latestState) return;
-    const now = new Date();
-    const stamp = formatLocalTimestamp(now);
-    const snapshot = {
-      ...latestState,
-      clientFeeRate: parseNumber(feeInput.value, 0),
-      clientStaleThresholdMs: parseNumber(staleInput.value, 3000),
-      renderedCycles: chartRows,
-      chartRange: {
-        x: chart.layout && chart.layout.xaxis ? chart.layout.xaxis.range : null,
-        y: chart.layout && chart.layout.yaxis ? chart.layout.yaxis.range : null,
-      },
-      visibleFilters: {
-        groups: [...enabledGroups],
-        showUnavailable: showUnavailableInput.checked,
-        autoScaleY: autoScaleInput.checked,
-      },
-      renderMetrics: {
-        renderFramesPerSec,
-        lastRenderDurationMs,
-      },
-    };
-
-    try {
-      const imageDataUrl = await Plotly.toImage(chart, {
-        format: "png",
-        width: chart.clientWidth || 1400,
-        height: chart.clientHeight || 720,
-        scale: 2,
-      });
-      const response = await fetch("/api/capture", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          imageDataUrl,
-          snapshot,
-          timestamp: now.toISOString(),
-        }),
-      });
-      const result = await response.json();
-
-      if (!response.ok || !result.ok) {
-        throw new Error(result.error || "Server-side capture failed");
-      }
-
-      showToast(`Saved ${result.pngPath} and ${result.jsonPath}`);
-    } catch (error) {
-      showToast(`${error.message}. Downloading locally instead.`);
-      const imageDataUrl = await Plotly.toImage(chart, { format: "png", scale: 2 });
-      const pngLink = document.createElement("a");
-      pngLink.href = imageDataUrl;
-      pngLink.download = `upbit-triangle-live-${stamp}.png`;
-      pngLink.click();
-
-      const jsonLink = document.createElement("a");
-      jsonLink.href = URL.createObjectURL(
-        new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" }),
-      );
-      jsonLink.download = `upbit-triangle-live-${stamp}.json`;
-      jsonLink.click();
-    }
-  }
-
   function bindControls() {
+    validateTabRegistry();
     tabButtons.forEach((button) => {
       button.addEventListener("click", () => {
         activateTab(button.dataset.tabTarget);
       });
-    });
-    feeInput.addEventListener("input", () => {
-      renderChart();
-    });
-    staleInput.addEventListener("input", () => {
-      renderChart();
     });
     autoScaleInput.addEventListener("change", renderChart);
     showUnavailableInput.addEventListener("change", renderChart);
@@ -1502,7 +1702,6 @@
     realGuardedButton.addEventListener("click", () => sendEngineCommand("Start", { runMode: "REAL_GUARDED" }).catch((error) => showToast(error.message)));
     pauseButton.addEventListener("click", () => sendEngineCommand("Pause").catch((error) => showToast(error.message)));
     stopButton.addEventListener("click", () => sendEngineCommand("Stop").catch((error) => showToast(error.message)));
-    emergencyStopButton.addEventListener("click", () => sendEngineCommand("Stop", { emergency: true }).catch((error) => showToast(error.message)));
     refreshLogsButton.addEventListener("click", () => refreshLogs().catch((error) => showToast(error.message)));
     exportDryRunJsonButton.addEventListener("click", () => exportDryRun("json").catch((error) => showToast(error.message)));
     exportDryRunCsvButton.addEventListener("click", () => exportDryRun("csv").catch((error) => showToast(error.message)));

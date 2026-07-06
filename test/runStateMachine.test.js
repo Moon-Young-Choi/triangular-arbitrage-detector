@@ -25,3 +25,12 @@ test("run state machine rejects invalid commands and transitions", () => {
   machine.apply("Start");
   assert.throws(() => machine.apply("Start"), /Cannot Start while RUNNING/);
 });
+
+test("run state machine can stop from ERROR after emergency stop", () => {
+  const machine = new RunStateMachine();
+
+  machine.fail(new Error("MAX_DAILY_LOSS"));
+  assert.equal(machine.state, STATES.ERROR);
+  assert.equal(machine.shouldContinueOrderManagement(), true);
+  assert.equal(machine.apply("Stop"), STATES.STOPPED);
+});

@@ -1,3 +1,94 @@
+const CLOSED_CANCEL_STATES = new Set(["cancel", "cancelled", "canceled"]);
+const FILL_STATES = new Set(["trade", "done"]);
+const META_KEYS = [
+  "planId",
+  "cycleId",
+  "routeVariantId",
+  "startAsset",
+  "strategyId",
+  "engineState",
+  "executionMode",
+  "legIndex",
+];
+
+function valueFrom(source = {}, snakeKey, camelKey) {
+  if (source[camelKey] !== undefined) return source[camelKey];
+  return source[snakeKey];
+}
+
+function numberOrNull(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function hasValue(value) {
+  return value !== null && value !== undefined;
+}
+
+function normalizedState(order = {}) {
+  return String(order.state || "").toLowerCase();
+}
+
+function extractMetadata(order = {}) {
+  return Object.fromEntries(
+    META_KEYS
+      .filter((key) => order[key] !== undefined)
+      .map((key) => [key, order[key]]),
+  );
+}
+
+function hasFillEvidence(order = {}) {
+  const executedVolume = numberOrNull(valueFrom(order, "executed_volume", "executedVolume"));
+  const paidFee = numberOrNull(valueFrom(order, "paid_fee", "paidFee"));
+  const tradeFee = numberOrNull(valueFrom(order, "trade_fee", "tradeFee"));
+
+  return FILL_STATES.has(normalizedState(order)) ||
+    Number(executedVolume || 0) > 0 ||
+    hasValue(paidFee) ||
+    hasValue(tradeFee);
+}
+
+function buildFillEvent(order = {}, mode = "REAL") {
+  const executedVolume = numberOrNull(valueFrom(order, "executed_volume", "executedVolume"));
+  const requestedVolume = numberOrNull(order.volume);
+  const remainingVolume = numberOrNull(valueFrom(order, "remaining_volume", "remainingVolume"));
+  const paidFee = numberOrNull(valueFrom(order, "paid_fee", "paidFee"));
+  const tradeFee = numberOrNull(valueFrom(order, "trade_fee", "tradeFee"));
+  const avgPrice = numberOrNull(valueFrom(order, "avg_price", "avgPrice"));
+  const price = numberOrNull(order.price);
+  const isPartial = Number(remainingVolume || 0) > 0 ||
+    (Number(requestedVolume || 0) > 0 &&
+      Number(executedVolume || 0) > 0 &&
+      Number(executedVolume) < Number(requestedVolume));
+
+  return {
+    type: isPartial ? "order.partial" : "order.fill",
+    mode: order.mode || mode || "REAL",
+    exchange: order.exchange || "upbit",
+    ...extractMetadata(order),
+    uuid: order.uuid,
+    identifier: order.identifier,
+    market: order.market,
+    side: order.side,
+    state: order.state,
+    source: order.source || "private-ws",
+    price,
+    avgPrice,
+    volume: requestedVolume,
+    requestedVolume,
+    executedVolume,
+    remainingVolume,
+    paidFee,
+    tradeFee,
+    isMaker: order.isMaker ?? order.is_maker ?? null,
+    isPartial,
+    tradeTimestamp: valueFrom(order, "trade_timestamp", "tradeTimestamp"),
+    orderTimestamp: valueFrom(order, "order_timestamp", "orderTimestamp"),
+    eventTimestamp: valueFrom(order, "event_timestamp", "eventTimestamp"),
+  };
+}
+
 class FillTracker {
   constructor(options = {}) {
     this.ordersByUuid = new Map();
@@ -29,9 +120,29 @@ class FillTracker {
     if (this.logStore) {
       this.logStore.append("orders", {
         type: "order.update",
-        mode: this.mode || "REAL",
+        mode: order.mode || this.mode || "REAL",
+        exchange: order.exchange || "upbit",
+        ...extractMetadata(order),
+        uuid: order.uuid,
+        identifier: order.identifier,
+        market: order.market,
+        state: order.state,
         order,
       }).catch(() => {});
+
+      if (CLOSED_CANCEL_STATES.has(normalizedState(order))) {
+        this.logStore.append("orders", {
+          type: "order.cancelled",
+          mode: order.mode || this.mode || "REAL",
+          exchange: order.exchange || "upbit",
+          ...extractMetadata(order),
+          uuid: order.uuid,
+          identifier: order.identifier,
+          market: order.market,
+          state: order.state,
+          reason: order.reason || order.cancelReason || null,
+        }).catch(() => {});
+      }
     }
 
     return order;
@@ -40,24 +151,8 @@ class FillTracker {
   handleMyOrder(event) {
     const order = this.upsertOrder(event);
 
-    if (event.state === "trade" || event.tradeFee !== null || event.paidFee !== null) {
-      const fill = {
-        type: "fill",
-        mode: this.mode || "REAL",
-        uuid: event.uuid,
-        identifier: event.identifier,
-        market: event.market,
-        side: event.side,
-        price: event.price,
-        avgPrice: event.avgPrice,
-        volume: event.volume,
-        executedVolume: event.executedVolume,
-        paidFee: event.paidFee,
-        tradeFee: event.tradeFee,
-        isMaker: event.isMaker,
-        tradeTimestamp: event.tradeTimestamp,
-        eventTimestamp: event.eventTimestamp,
-      };
+    if (hasFillEvidence(order)) {
+      const fill = buildFillEvent(order, this.mode);
 
       this.fills.push(fill);
 
@@ -129,4 +224,6 @@ class FillTracker {
 
 module.exports = {
   FillTracker,
+  buildFillEvent,
+  hasFillEvidence,
 };

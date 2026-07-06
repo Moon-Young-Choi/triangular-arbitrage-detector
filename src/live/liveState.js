@@ -8,7 +8,7 @@ const { calculateCycleMultiplier } = require("../lib/multiplier");
 const { fetchUpbitMarkets, fetchOrderbooks } = require("../lib/upbitApi");
 const { DEFAULT_RUNTIME_CONFIG, freezeRuntimeConfig } = require("../core/runtimeConfig");
 const { TimingTrace, perfNowNs } = require("../core/timingTrace");
-const { buildExecutionPlan, executionLogMode } = require("../execution/executionPlan");
+const { executionLogMode } = require("../execution/executionPlan");
 const { createStrategyRegistry } = require("../strategies/registry");
 const { validateDepthAwareCandidate } = require("./candidateValidator");
 const {
@@ -58,10 +58,62 @@ function toCalculationOrderbook(topOfBook) {
   return {
     market: topOfBook.market,
     timestamp: topOfBook.timestamp,
+    exchangeTimestampMs: topOfBook.exchangeTimestampMs ?? topOfBook.timestamp,
     receivedAt: topOfBook.receivedAt,
+    serverReceivedAtMs: topOfBook.serverReceivedAtMs ?? topOfBook.receivedAt,
     streamType: topOfBook.streamType,
+    traceId: topOfBook.traceId,
+    localSequence: topOfBook.localSequence,
     orderbookUnit: topOfBook.orderbookUnit || units.length,
+    unit: topOfBook.unit || topOfBook.orderbookUnit || units.length,
+    orderbookLevel: topOfBook.orderbookLevel ?? null,
     orderbook_units: units,
+    orderbookUnits: units,
+  };
+}
+
+function orderbookAuditPayload(feedName, orderbook) {
+  if (!orderbook) return null;
+
+  const units = Array.isArray(orderbook.orderbook_units)
+    ? orderbook.orderbook_units
+    : orderbook.orderbookUnits || [];
+
+  return {
+    type: "market.orderbook_update",
+    mode: null,
+    exchange: orderbook.exchange || "upbit",
+    feedName,
+    market: orderbook.market,
+    unit: orderbook.unit || orderbook.orderbookUnit || units.length,
+    orderbookUnit: orderbook.orderbookUnit || orderbook.unit || units.length,
+    orderbookLevel: orderbook.orderbookLevel ?? null,
+    streamType: orderbook.streamType,
+    traceId: orderbook.traceId,
+    localSequence: orderbook.localSequence,
+    exchangeTimestampMs: orderbook.exchangeTimestampMs,
+    serverReceivedAtMs: orderbook.serverReceivedAtMs,
+    receivedAt: orderbook.serverReceivedAtMs,
+    askPrice: orderbook.askPrice,
+    bidPrice: orderbook.bidPrice,
+    askSize: orderbook.askSize,
+    bidSize: orderbook.bidSize,
+    orderbook_units: units,
+    orderbookUnits: units,
+    excludeFromDryRunSummary: true,
+    payload: {
+      feedName,
+      market: orderbook.market,
+      unit: orderbook.unit || orderbook.orderbookUnit || units.length,
+      traceId: orderbook.traceId,
+      localSequence: orderbook.localSequence,
+      exchangeTimestampMs: orderbook.exchangeTimestampMs,
+      serverReceivedAtMs: orderbook.serverReceivedAtMs,
+      orderbookLevel: orderbook.orderbookLevel ?? null,
+      bestAskPrice: orderbook.askPrice,
+      bestBidPrice: orderbook.bidPrice,
+      orderbookUnitCount: units.length,
+    },
   };
 }
 
@@ -106,6 +158,12 @@ function markerColorFor(direction, status, isActuallyProfitable) {
   return "#2d6f9f";
 }
 
+function normalizeFeePolicyMap(source) {
+  if (!source) return new Map();
+  if (source instanceof Map) return new Map(source);
+  return new Map(Object.entries(source));
+}
+
 function compactCycleForDelta(row) {
   return {
     triangleId: row.triangleId,
@@ -136,7 +194,13 @@ function compactCycleForDelta(row) {
     expectedSlippageBps: row.expectedSlippageBps,
     bestLevelTouchRatio: row.bestLevelTouchRatio,
     residualAfterOrder: row.residualAfterOrder,
+    observationValidationGapMs: row.observationValidationGapMs,
+    observationValidationGapMarket: row.observationValidationGapMarket,
+    validationLegTimestampSkewMs: row.validationLegTimestampSkewMs,
+    oldestValidationReceivedAgeMs: row.oldestValidationReceivedAgeMs,
+    validationOrderbookSources: row.validationOrderbookSources,
     strategyId: row.strategyId,
+    strategyVersion: row.strategyVersion,
     strategyAccepted: row.strategyAccepted,
     strategyReason: row.strategyReason,
     executionFeasibility: row.executionFeasibility,
@@ -154,6 +218,8 @@ class LiveTriangleState {
     this.feeRate = parseFeeRate(options.feeRate, 0);
     this.staleOrderbookMs = options.staleOrderbookMs || 3000;
     this.runtimeConfig = freezeRuntimeConfig(options.runtimeConfig || DEFAULT_RUNTIME_CONFIG);
+    this.fetchMarkets = options.fetchMarkets || fetchUpbitMarkets;
+    this.fetchOrderbooks = options.fetchOrderbooks || fetchOrderbooks;
     this.serverStartedAt = new Date().toISOString();
     this.engineState = options.engineState || "STOPPED";
     this.marketRows = [];
@@ -168,6 +234,8 @@ class LiveTriangleState {
     this.groups = [];
     this.groupCounts = {};
     this.xRange = { min: 0.25, max: 1.75 };
+    this.requiredMarkets = [];
+    this.hubBreakdown = {};
     this.metrics = options.metrics || new RuntimeMetrics();
     this.observationStore = options.observationStore || new ObservationOrderbookStore({
       orderbookUnit: this.runtimeConfig.observationOrderbookUnit,
@@ -192,6 +260,11 @@ class LiveTriangleState {
     };
     this.strategyRegistry = options.strategyRegistry || createStrategyRegistry();
     this.activeStrategy = this.strategyRegistry.get(this.runtimeConfig.activeStrategyId);
+    this.runtimeConfig = freezeRuntimeConfig({
+      ...this.runtimeConfig,
+      activeStrategyId: this.activeStrategy.id,
+    });
+    this.feePolicyByMarket = normalizeFeePolicyMap(options.feePolicyByMarket);
     this.eventLog = [];
     this.logStore = options.logStore || null;
     this.executionHandler = options.executionHandler || null;
@@ -200,11 +273,20 @@ class LiveTriangleState {
     this.lastOrderbookReceivedAt = null;
     this.lastFallbackPollAt = null;
     this.lastFallbackPollError = null;
+    this.initializationError = null;
   }
 
   setRuntimeConfig(runtimeConfig) {
-    this.runtimeConfig = freezeRuntimeConfig(runtimeConfig);
-    this.activeStrategy = this.strategyRegistry.get(this.runtimeConfig.activeStrategyId);
+    const frozenConfig = freezeRuntimeConfig(runtimeConfig);
+    this.activeStrategy = this.strategyRegistry.get(frozenConfig.activeStrategyId);
+    this.runtimeConfig = freezeRuntimeConfig({
+      ...frozenConfig,
+      activeStrategyId: this.activeStrategy.id,
+    });
+  }
+
+  setFeePolicyByMarket(feePolicyByMarket) {
+    this.feePolicyByMarket = normalizeFeePolicyMap(feePolicyByMarket);
   }
 
   setExecutionHandler(handler) {
@@ -212,30 +294,82 @@ class LiveTriangleState {
   }
 
   async initialize() {
-    const upbitMarkets = await fetchUpbitMarkets();
-    const { normalizedMarkets, graph, pairMap, quoteCounts } = buildGraph(upbitMarkets);
-    const triangles = findUniqueTriangles(graph, pairMap);
-    const directionalCycles = buildDirectionalCycles(triangles, pairMap, {
-      enabledStartAssets: this.runtimeConfig.enabledStartAssets,
-    });
-    const layout = buildStableCycleLayout(directionalCycles);
+    try {
+      const upbitMarkets = await this.fetchMarkets();
+      const { normalizedMarkets, graph, pairMap, quoteCounts } = buildGraph(upbitMarkets);
+      const triangles = findUniqueTriangles(graph, pairMap);
+      const directionalCycles = buildDirectionalCycles(triangles, pairMap, {
+        enabledStartAssets: this.runtimeConfig.enabledStartAssets,
+      });
+      const layout = buildStableCycleLayout(directionalCycles);
 
-    this.marketRows = normalizedMarkets;
-    this.quoteCounts = quoteCounts;
-    this.triangles = triangles;
-    this.cycles = layout.cycles;
-    this.cycleIndex = new Map(this.cycles.map((cycle) => [cycle.cycleId, cycle]));
-    this.groups = layout.groups;
-    this.groupCounts = layout.groupCounts;
-    this.xRange = layout.xRange;
-    this.hubBreakdown = getHubBreakdownCounts(triangles);
-    this.requiredMarkets = [...new Set(this.cycles.flatMap((cycle) => cycle.markets))].sort();
-    this.marketToCycleIds = this.buildMarketToCycleIds();
-    this.recalculateAll({ markDirty: false });
+      this.marketRows = normalizedMarkets;
+      this.quoteCounts = quoteCounts;
+      this.triangles = triangles;
+      this.cycles = layout.cycles;
+      this.cycleIndex = new Map(this.cycles.map((cycle) => [cycle.cycleId, cycle]));
+      this.groups = layout.groups;
+      this.groupCounts = layout.groupCounts;
+      this.xRange = layout.xRange;
+      this.hubBreakdown = getHubBreakdownCounts(triangles);
+      this.requiredMarkets = [...new Set(this.cycles.flatMap((cycle) => cycle.markets))].sort();
+      this.marketToCycleIds = this.buildMarketToCycleIds();
+      this.initializationError = null;
+      this.recalculateAll({ markDirty: false });
+      return {
+        ok: true,
+        marketsLoaded: this.marketRows.length,
+        cycles: this.cycles.length,
+      };
+    } catch (error) {
+      const message = error && error.message || String(error);
+
+      this.marketRows = [];
+      this.quoteCounts = new Map();
+      this.triangles = [];
+      this.cycles = [];
+      this.cycleIndex = new Map();
+      this.cycleRows = new Map();
+      this.marketToCycleIds = new Map();
+      this.groups = [];
+      this.groupCounts = {};
+      this.xRange = { min: 0.25, max: 1.75 };
+      this.hubBreakdown = {};
+      this.requiredMarkets = [];
+      this.initializationError = {
+        source: "upbit-market-discovery",
+        message,
+        at: new Date().toISOString(),
+      };
+      this.lastFallbackPollError = this.initializationError;
+      this.logEvent("market.initialize_failed", {
+        source: this.initializationError.source,
+        message,
+      });
+      return {
+        ok: false,
+        error: this.initializationError,
+      };
+    }
   }
 
   async loadInitialOrderbooks(options = {}) {
-    const result = await fetchOrderbooks(this.requiredMarkets, options);
+    if (!Array.isArray(this.requiredMarkets) || this.requiredMarkets.length === 0) {
+      const receivedAt = Date.now();
+      const result = {
+        orderbookMap: new Map(),
+        errors: this.initializationError ? [this.initializationError] : [],
+        requestedMarketCount: 0,
+        fetchedMarketCount: 0,
+      };
+
+      this.lastFallbackPollAt = new Date(receivedAt).toISOString();
+      this.lastFallbackPollError = result.errors.length > 0 ? result.errors : null;
+      this.recalculateAll({ markDirty: options.markDirty !== false, lastChangedMarket: null });
+      return result;
+    }
+
+    const result = await this.fetchOrderbooks(this.requiredMarkets, options);
     const receivedAt = Date.now();
 
     for (const orderbook of result.orderbookMap.values()) {
@@ -247,12 +381,14 @@ class LiveTriangleState {
       });
 
       if (observation) {
-        this.observationStore.update(observation, receivedAt);
+        const normalizedObservation = this.observationStore.update(observation, receivedAt);
+        this.appendMarketOrderbookUpdate("observation", normalizedObservation);
         this.lastOrderbookReceivedAt = new Date(receivedAt).toISOString();
       }
 
       if (validation) {
-        this.validationStore.update(validation, receivedAt);
+        const normalizedValidation = this.validationStore.update(validation, receivedAt);
+        this.appendMarketOrderbookUpdate("validation", normalizedValidation);
       }
     }
 
@@ -264,7 +400,22 @@ class LiveTriangleState {
 
   async fallbackPoll(options = {}) {
     try {
+      let marketDiscovery = null;
+
+      if (this.initializationError && (!Array.isArray(this.requiredMarkets) || this.requiredMarkets.length === 0)) {
+        marketDiscovery = await this.initialize();
+
+        if (marketDiscovery.ok) {
+          this.logEvent("market.initialize_recovered", {
+            marketsLoaded: marketDiscovery.marketsLoaded,
+            cycles: marketDiscovery.cycles,
+          });
+        }
+      }
+
       const result = await this.loadInitialOrderbooks(options);
+      result.marketDiscovery = marketDiscovery;
+      result.marketDiscoveryRecovered = Boolean(marketDiscovery && marketDiscovery.ok);
       this.lastFallbackPollError = result.errors.length > 0 ? result.errors : null;
       return result;
     } catch (error) {
@@ -290,6 +441,7 @@ class LiveTriangleState {
       return [];
     }
     const cacheWriteDonePerfNs = perfNowNs();
+    this.appendMarketOrderbookUpdate("observation", normalized);
 
     this.lastOrderbookReceivedAt = new Date(normalized.receivedAt || Date.now()).toISOString();
 
@@ -331,6 +483,7 @@ class LiveTriangleState {
     if (!normalized) {
       return [];
     }
+    this.appendMarketOrderbookUpdate("validation", normalized);
 
     const affectedCycleIds = [...(this.marketToCycleIds.get(normalized.market) || [])];
     this.recalculateCycles(affectedCycleIds, {
@@ -410,10 +563,11 @@ class LiveTriangleState {
     this.activeStrategy = this.strategyRegistry.get(strategyId);
     this.runtimeConfig = freezeRuntimeConfig({
       ...this.runtimeConfig,
-      activeStrategyId: strategyId,
+      activeStrategyId: this.activeStrategy.id,
     });
     this.logEvent("strategy-selection", {
-      strategyId,
+      strategyId: this.activeStrategy.id,
+      requestedStrategyId: strategyId,
       reason: "selected while STOPPED",
     });
     this.recalculateAll({ markDirty: true });
@@ -444,6 +598,36 @@ class LiveTriangleState {
     return event;
   }
 
+  appendAuditEvent(type, payload = {}) {
+    if (!this.logStore) return;
+
+    this.logStore.append("events", {
+      type,
+      exchange: "upbit",
+      engineState: this.engineState,
+      runtimeRunMode: this.runtimeConfig.runMode,
+      excludeFromDryRunSummary: true,
+      ...payload,
+    }).catch(() => {});
+  }
+
+  appendMarketOrderbookUpdate(feedName, orderbook) {
+    if (!this.logStore) return null;
+    const auditPayload = orderbookAuditPayload(feedName, orderbook);
+
+    if (!auditPayload) return null;
+
+    const event = {
+      ...auditPayload,
+      mode: executionLogMode(this.runtimeConfig.runMode),
+      engineState: this.engineState,
+      runtimeRunMode: this.runtimeConfig.runMode,
+    };
+
+    this.logStore.append("market", event).catch(() => {});
+    return event;
+  }
+
   logDecision(row) {
     const mode = executionLogMode(this.runtimeConfig.runMode);
     const expectedNetProfit = row.executableStartAmount === null || row.executableStartAmount === undefined ||
@@ -451,15 +635,85 @@ class LiveTriangleState {
       ? null
       : Number(row.executableStartAmount) * Number(row.netProfitRate);
     const latencyMs = row.latency && row.latency.estimatedEndToDisplayMs;
-
-    this.logEvent("strategy-decision", {
+    const baseAudit = {
       mode,
+      traceId: row.cycleId,
       cycleId: row.cycleId,
       routeVariantId: row.routeVariantId,
       startAsset: row.startAsset,
       direction: row.direction,
       strategyId: row.strategyId,
+      strategyVersion: row.strategyVersion,
+    };
+
+    this.logEvent("strategy-decision", {
+      mode,
+      excludeFromDryRunSummary: true,
+      cycleId: row.cycleId,
+      routeVariantId: row.routeVariantId,
+      startAsset: row.startAsset,
+      direction: row.direction,
+      strategyId: row.strategyId,
+      strategyVersion: row.strategyVersion,
       accepted: row.strategyAccepted,
+      reason: row.strategyReason,
+      validationReason: row.validationReason,
+      expectedNetProfit,
+      latencyMs,
+    });
+
+    this.appendAuditEvent("candidate.detected", {
+      ...baseAudit,
+      status: row.status,
+      opportunityClass: row.opportunityClass,
+      grossMultiplier: row.grossMultiplier,
+      netMultiplier: row.netMultiplier,
+      oldestLegAgeMs: row.oldestLegAgeMs,
+      maxLegAgeMs: row.maxLegAgeMs,
+      legTimestamps: row.legTimestamps,
+    });
+
+    this.appendAuditEvent("candidate.validated", {
+      ...baseAudit,
+      validationStatus: row.validationStatus,
+      validationReason: row.validationReason,
+      validationAccepted: row.validationStatus === "accepted",
+      executableStartAmount: row.executableStartAmount,
+      maxExecutableStartAmount: row.maxExecutableStartAmount,
+      limitingLeg: row.limitingLeg,
+      limitingMarket: row.limitingMarket,
+      expectedSlippageBps: row.expectedSlippageBps,
+      bestLevelTouchRatio: row.bestLevelTouchRatio,
+      residualAfterOrder: row.residualAfterOrder,
+      depthLegs: row.depthLegs,
+      observationValidationGapMs: row.observationValidationGapMs,
+      observationValidationGapMarket: row.observationValidationGapMarket,
+      validationLegTimestampSkewMs: row.validationLegTimestampSkewMs,
+      oldestValidationReceivedAgeMs: row.oldestValidationReceivedAgeMs,
+      validationOrderbookSources: row.validationOrderbookSources,
+      validationOrderbookMetadata: row.validationOrderbookMetadata,
+      expectedValidationOrderbookUnit: row.expectedValidationOrderbookUnit,
+    });
+
+    if (row.validationStatus !== "accepted") {
+      this.appendAuditEvent("risk.rejected", {
+        ...baseAudit,
+        reason: row.validationReason || row.unavailableReason || row.staleReason || "VALIDATION_REJECTED",
+        validationStatus: row.validationStatus,
+        validationReason: row.validationReason,
+        limitingLeg: row.limitingLeg,
+        limitingMarket: row.limitingMarket,
+        observationValidationGapMs: row.observationValidationGapMs,
+        observationValidationGapMarket: row.observationValidationGapMarket,
+        validationLegTimestampSkewMs: row.validationLegTimestampSkewMs,
+        oldestValidationReceivedAgeMs: row.oldestValidationReceivedAgeMs,
+        validationOrderbookSources: row.validationOrderbookSources,
+      });
+    }
+
+    this.appendAuditEvent(row.strategyAccepted ? "strategy.accepted" : "strategy.rejected", {
+      ...baseAudit,
+      strategyAccepted: row.strategyAccepted,
       reason: row.strategyReason,
       validationReason: row.validationReason,
       expectedNetProfit,
@@ -475,13 +729,31 @@ class LiveTriangleState {
         startAsset: row.startAsset,
         direction: row.direction,
         strategyId: row.strategyId,
+        strategyVersion: row.strategyVersion,
         accepted: row.strategyAccepted,
         reason: row.strategyReason,
+        status: row.status,
+        marketState: row.status,
+        opportunityClass: row.opportunityClass,
+        staleReason: row.staleReason,
+        unavailableReason: row.unavailableReason,
+        validationStatus: row.validationStatus,
         validationReason: row.validationReason,
         grossMultiplier: row.grossMultiplier,
         netMultiplier: row.netMultiplier,
         expectedNetProfit,
         latencyMs,
+        executableStartAmount: row.executableStartAmount,
+        maxExecutableStartAmount: row.maxExecutableStartAmount,
+        limitingLeg: row.limitingLeg,
+        limitingMarket: row.limitingMarket,
+        expectedSlippageBps: row.expectedSlippageBps,
+        bestLevelTouchRatio: row.bestLevelTouchRatio,
+        observationValidationGapMs: row.observationValidationGapMs,
+        observationValidationGapMarket: row.observationValidationGapMarket,
+        validationLegTimestampSkewMs: row.validationLegTimestampSkewMs,
+        oldestValidationReceivedAgeMs: row.oldestValidationReceivedAgeMs,
+        validationOrderbookSources: row.validationOrderbookSources,
         timingBreakdown: row.timingBreakdown,
       }).catch(() => {});
     }
@@ -500,14 +772,52 @@ class LiveTriangleState {
       return;
     }
 
-    const plan = buildExecutionPlan({
+    const plan = this.activeStrategy.buildExecutionPlan({
       cycle,
       row,
       validationOrderbooks,
       runtimeConfig: this.runtimeConfig,
       feeRate: this.feeRate,
+      feePolicyByMarket: this.feePolicyByMarket,
       staleOrderbookMs: this.staleOrderbookMs,
       engineState: this.engineState,
+      depthValidation: {
+        validationStatus: row.validationStatus,
+        validationReason: row.validationReason,
+      },
+      decision: {
+        strategyId: row.strategyId,
+        strategyVersion: row.strategyVersion,
+        accepted: row.strategyAccepted,
+        reason: row.strategyReason,
+      },
+    });
+
+    if (!plan) {
+      return;
+    }
+
+    this.appendAuditEvent("execution.plan_created", {
+      mode: plan.mode,
+      traceId: plan.planId,
+      planId: plan.planId,
+      cycleId: plan.cycleId,
+      routeVariantId: plan.routeVariantId,
+      startAsset: plan.startAsset,
+      strategyId: plan.strategyId,
+      strategyVersion: plan.strategyVersion,
+      executionMode: plan.executionMode,
+      startAmount: plan.startAmount,
+      expectedOutputAmount: plan.expectedOutputAmount,
+      expectedNetProfit: plan.expectedNetProfit,
+      validationStatus: plan.validationStatus,
+      validationReason: plan.validationReason,
+      marketState: plan.marketState,
+      opportunityClass: plan.opportunityClass,
+      oldestLegAgeMs: plan.oldestLegAgeMs,
+      legTimestampSkewMs: plan.legTimestampSkewMs,
+      decisionAgeMs: plan.decisionAgeMs,
+      bestLevelTouchRatio: plan.bestLevelTouchRatio,
     });
 
     Promise.resolve()
@@ -586,11 +896,19 @@ class LiveTriangleState {
     const lastUpbitTimestampMs = options.lastUpbitTimestampMs ||
       (legTimestamps.length > 0 ? Math.max(...legTimestamps) : null);
     const riskStartPerfNs = perfNowNs();
+    const marketDataGuards = this.runtimeConfig.executionPolicy.marketDataGuards || {};
     const depthValidation = validateDepthAwareCandidate(cycle, validationOrderbooks, {
       feeRate: this.feeRate,
+      feePolicyByMarket: this.feePolicyByMarket,
       nowMs: calculatedAtEpochMs,
       staleOrderbookMs: this.staleOrderbookMs,
-      config: this.runtimeConfig.candidateValidation,
+      observationOrderbooks: calculationOrderbooks,
+      config: {
+        ...this.runtimeConfig.candidateValidation,
+        expectedValidationOrderbookUnit: this.runtimeConfig.validationOrderbookUnit,
+        maxValidationLegTimestampSkewMs: marketDataGuards.maxLegTimestampSkewMs,
+        maxOldestValidationReceivedAgeMs: marketDataGuards.maxOldestLegAgeMs,
+      },
     });
     const riskDonePerfNs = perfNowNs();
     const row = {
@@ -638,6 +956,13 @@ class LiveTriangleState {
       bestLevelTouchRatio: depthValidation.bestLevelTouchRatio,
       residualAfterOrder: depthValidation.residualAfterOrder,
       depthLegs: depthValidation.depthLegs,
+      observationValidationGapMs: depthValidation.observationValidationGapMs,
+      observationValidationGapMarket: depthValidation.observationValidationGapMarket,
+      validationLegTimestampSkewMs: depthValidation.validationLegTimestampSkewMs,
+      oldestValidationReceivedAgeMs: depthValidation.oldestValidationReceivedAgeMs,
+      validationOrderbookSources: depthValidation.validationOrderbookSources,
+      validationOrderbookMetadata: depthValidation.validationOrderbookMetadata,
+      expectedValidationOrderbookUnit: depthValidation.expectedValidationOrderbookUnit,
       legTimestamps,
       newestLegAgeMs: freshness.newestLegAgeMs,
       oldestLegAgeMs: freshness.oldestLegAgeMs,
@@ -675,11 +1000,14 @@ class LiveTriangleState {
     });
 
     row.strategyId = strategyDecision.strategyId;
+    row.strategyVersion = strategyDecision.strategyVersion || this.activeStrategy.version;
     row.strategyAccepted = strategyDecision.accepted;
     row.strategyReason = strategyDecision.reason;
-    row.executionFeasibility = strategyDecision.accepted && depthValidation.validationStatus === "accepted"
-      ? "EXECUTABLE_CANDIDATE"
-      : strategyDecision.reason || depthValidation.validationReason || "NOT_EXECUTABLE";
+    row.executionFeasibility = depthValidation.validationStatus !== "accepted"
+      ? depthValidation.validationReason || "VALIDATION_REJECTED"
+      : strategyDecision.accepted
+        ? "EXECUTABLE_CANDIDATE"
+        : strategyDecision.reason || "STRATEGY_REJECTED";
     row.timingTrace = timingTrace.serialize();
     row.timingBreakdown = timingTrace.breakdown();
 
@@ -810,6 +1138,7 @@ class LiveTriangleState {
       requiredMarketCount: this.requiredMarkets ? this.requiredMarkets.length : 0,
       fallbackLastPolledAt: this.lastFallbackPollAt,
       fallbackLastError: this.lastFallbackPollError,
+      marketDiscoveryError: this.initializationError,
       startAssetCounts,
       strategyAcceptedCount: cycles.filter((cycle) => cycle.strategyAccepted).length,
       strategyRejectedCount: cycles.filter((cycle) => cycle.strategyAccepted === false).length,
@@ -869,6 +1198,13 @@ class LiveTriangleState {
   getHealth() {
     return {
       ok: true,
+      degraded: Boolean(this.initializationError),
+      marketDataStatus: {
+        initialized: this.initializationError === null,
+        initializationError: this.initializationError,
+        requiredMarketCount: this.requiredMarkets ? this.requiredMarkets.length : 0,
+        fallbackLastError: this.lastFallbackPollError,
+      },
       serverStartedAt: this.serverStartedAt,
       wsStatus: this.wsStatus,
       marketsLoaded: this.marketRows.length,

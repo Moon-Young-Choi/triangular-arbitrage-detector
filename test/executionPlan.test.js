@@ -18,6 +18,7 @@ test("execution plan preserves strategy, depth, expected profit, and latency fie
       cycleId: "cycle-1",
       startAsset: "KRW",
       strategyId: "depthAwareBestIoc",
+      strategyVersion: "0.1.0",
       executableStartAmount: 10000,
       netMultiplier: 1.01,
       netProfitRate: 0.01,
@@ -28,8 +29,13 @@ test("execution plan preserves strategy, depth, expected profit, and latency fie
         estimatedEndToDisplayMs: 25,
       },
       calculatedAtEpochMs: 2000,
+      status: "available",
+      opportunityClass: "profitable",
       validationStatus: "accepted",
       validationReason: "ACCEPTED",
+      observationValidationGapMs: 12,
+      validationLegTimestampSkewMs: 120,
+      validationOrderbookSources: { "KRW-BTC": "REALTIME" },
     },
     validationOrderbooks: new Map([
       ["KRW-BTC", { market: "KRW-BTC" }],
@@ -44,16 +50,27 @@ test("execution plan preserves strategy, depth, expected profit, and latency fie
     feeRate: 0.0005,
     staleOrderbookMs: 1000,
     engineState: "RUNNING",
+    feePolicyByMarket: {
+      "KRW-BTC": {
+        bidFee: 0.0005,
+      },
+    },
     nowMs: 2500,
   });
 
   assert.equal(plan.mode, "DRY_RUN");
   assert.equal(plan.strategyId, "depthAwareBestIoc");
+  assert.equal(plan.strategyVersion, "0.1.0");
   assert.equal(plan.expectedNetProfit, 100);
   assert.equal(plan.legTimestampSkewMs, 120);
   assert.equal(plan.exchangeToServerLatencyMs, 7);
   assert.equal(plan.decisionAgeMs, 500);
+  assert.equal(plan.marketState, "available");
+  assert.equal(plan.opportunityClass, "profitable");
+  assert.equal(plan.feePolicyByMarket["KRW-BTC"].bidFee, 0.0005);
   assert.equal(plan.validationOrderbooks.get("KRW-BTC").market, "KRW-BTC");
+  assert.equal(plan.observationValidationGapMs, 12);
+  assert.equal(plan.validationOrderbookSources["KRW-BTC"], "REALTIME");
 });
 
 test("leg timestamp skew handles incomplete timestamp sets", () => {

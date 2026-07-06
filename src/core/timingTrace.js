@@ -63,6 +63,9 @@ class TimingTrace {
       strategyMs: diffNsToMs(p.strategyDonePerfNs, p.strategyStartPerfNs),
       riskMs: diffNsToMs(p.riskDonePerfNs, p.riskStartPerfNs),
       orderAckMs: diffNsToMs(p.orderAckPerfNs, p.orderSubmitStartPerfNs),
+      orderReconciliationMs: diffNsToMs(p.reconciliationDonePerfNs, p.reconciliationStartedPerfNs),
+      orderQueryMs: diffNsToMs(p.orderQueryDonePerfNs, p.reconciliationStartedPerfNs),
+      privateWsFillMs: diffNsToMs(p.privateWsFillReceivePerfNs, p.orderSubmitStartPerfNs),
       browserApplyToRenderMs: p.browserRenderDonePerfMs !== undefined && p.browserApplyStartPerfMs !== undefined
         ? p.browserRenderDonePerfMs - p.browserApplyStartPerfMs
         : null,

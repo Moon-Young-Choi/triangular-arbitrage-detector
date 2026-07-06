@@ -1,12 +1,18 @@
 const http = require("node:http");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { URL } = require("node:url");
 const WebSocket = require("ws");
 const { LiveTriangleState, parseFeeRate } = require("./liveState");
-const { formatLocalTimestampForFilename } = require("./liveUtils");
 const { loadRuntimeConfig } = require("../core/runtimeConfig");
-const { UpbitWsOrderbookClient } = require("../upbit/wsOrderbookClient");
+const { AppendOnlyLogStore } = require("../core/appendOnlyLog");
+const { CommandStatusStore } = require("../core/commandStatusStore");
+const { normalizeDashboardCommandPayload } = require("../core/commandPolicy");
+const { UpbitWsOrderbookClient } = require("../exchanges/upbit/publicWsOrderbookClient");
+const { executionLogMode } = require("../execution/executionPlan");
+const { dryRunReportCsv, summarizeDryRun } = require("../dashboard/dryRunReport");
+const { readFilteredLogs } = require("./logReadModel");
 
 function contentTypeFor(filePath) {
   const extension = path.extname(filePath);
@@ -41,7 +47,7 @@ function isLocalRequest(req) {
   return ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(remoteAddress);
 }
 
-async function readJsonBody(req, maxBytes = 20 * 1024 * 1024) {
+async function readJsonBody(req, maxBytes = 1024 * 1024) {
   let body = "";
 
   for await (const chunk of req) {
@@ -53,6 +59,37 @@ async function readJsonBody(req, maxBytes = 20 * 1024 * 1024) {
   }
 
   return JSON.parse(body || "{}");
+}
+
+function commandFromPathname(pathname) {
+  if (!pathname.startsWith("/api/command/")) return null;
+
+  const commandName = pathname.slice("/api/command/".length).toLowerCase();
+  if (commandName === "start") return "Start";
+  if (commandName === "pause") return "Pause";
+  if (commandName === "stop") return "Stop";
+  return undefined;
+}
+
+function logFiltersFromUrl(requestUrl) {
+  const kind = requestUrl.searchParams.get("kind") || "all";
+  const limit = Number.parseInt(requestUrl.searchParams.get("limit") || "200", 10);
+
+  return {
+    kind,
+    filters: {
+      kind,
+      limit: Number.isInteger(limit) ? limit : 200,
+      mode: requestUrl.searchParams.get("mode") || "",
+      type: requestUrl.searchParams.get("type") || "",
+      startAsset: requestUrl.searchParams.get("startAsset") || "",
+      strategyId: requestUrl.searchParams.get("strategyId") || "",
+      cycleId: requestUrl.searchParams.get("cycleId") || "",
+      from: requestUrl.searchParams.get("from") || "",
+      to: requestUrl.searchParams.get("to") || "",
+      sinceMs: requestUrl.searchParams.get("sinceMs") || "",
+    },
+  };
 }
 
 async function serveFile(res, filePath) {
@@ -84,43 +121,14 @@ function resolvePublicPath(publicDir, pathname) {
   return resolved;
 }
 
-async function saveCapture(capturesDir, payload) {
-  const { imageDataUrl, snapshot, timestamp } = payload;
-
-  if (typeof imageDataUrl !== "string" || !imageDataUrl.startsWith("data:image/png;base64,")) {
-    throw new Error("imageDataUrl must be a PNG data URL");
-  }
-
-  const requestedDate = timestamp ? new Date(timestamp) : new Date();
-  const captureDate = Number.isNaN(requestedDate.getTime()) ? new Date() : requestedDate;
-  const stamp = formatLocalTimestampForFilename(captureDate);
-  const baseName = `upbit-triangle-live-${stamp}`;
-  const pngPath = path.join(capturesDir, `${baseName}.png`);
-  const jsonPath = path.join(capturesDir, `${baseName}.json`);
-  const base64 = imageDataUrl.slice("data:image/png;base64,".length);
-  const imageBuffer = Buffer.from(base64, "base64");
-
-  if (imageBuffer.length === 0) {
-    throw new Error("PNG payload is empty");
-  }
-
-  await fs.mkdir(capturesDir, { recursive: true });
-  await fs.writeFile(pngPath, imageBuffer);
-  await fs.writeFile(jsonPath, `${JSON.stringify({ timestamp: captureDate.toISOString(), snapshot }, null, 2)}\n`);
-
-  return {
-    ok: true,
-    pngPath,
-    jsonPath,
-  };
-}
-
 function createRequestHandler(options) {
   const {
     state,
     publicDir = path.resolve(process.cwd(), "public"),
-    capturesDir = path.resolve(process.cwd(), "out", "captures"),
     plotlyPath = require.resolve("plotly.js-dist-min/plotly.min.js"),
+    logStore = new AppendOnlyLogStore(),
+    commandStatusStore = new CommandStatusStore(),
+    commandHandler = null,
     sseClients = new Set(),
   } = options;
 
@@ -133,47 +141,170 @@ function createRequestHandler(options) {
     const requestUrl = new URL(req.url, "http://localhost");
 
     try {
-      if (req.method === "GET" && requestUrl.pathname === "/api/health") {
+      if (req.method === "GET" && ["/api/health", "/api/dashboard/health"].includes(requestUrl.pathname)) {
         sendJson(res, 200, state.getHealth());
         return;
       }
 
-      if (req.method === "GET" && requestUrl.pathname === "/api/state") {
+      if (req.method === "GET" && ["/api/state", "/api/dashboard/snapshot"].includes(requestUrl.pathname)) {
         sendJson(res, 200, state.getSnapshot());
+        return;
+      }
+
+      if (req.method === "GET" && ["/api/logs", "/api/dashboard/logs"].includes(requestUrl.pathname)) {
+        const { kind, filters } = logFiltersFromUrl(requestUrl);
+        sendJson(res, 200, {
+          ok: true,
+          kind,
+          logs: await readFilteredLogs(logStore, filters),
+        });
+        return;
+      }
+
+      if (
+        req.method === "GET" &&
+        ["/api/dry-run-report", "/api/dashboard/dry-run-report"].includes(requestUrl.pathname)
+      ) {
+        const logs = await readFilteredLogs(logStore, {
+          kind: "all",
+          limit: Number.parseInt(requestUrl.searchParams.get("limit") || "5000", 10),
+          mode: "DRY_RUN",
+          from: requestUrl.searchParams.get("from") || "",
+          to: requestUrl.searchParams.get("to") || "",
+          sinceMs: requestUrl.searchParams.get("sinceMs") || "",
+        });
+        const summary = summarizeDryRun(logs);
+
+        if (requestUrl.searchParams.get("format") === "csv") {
+          res.writeHead(200, {
+            "Content-Type": "text/csv; charset=utf-8",
+            "Cache-Control": "no-store",
+            "Content-Disposition": "attachment; filename=\"dry-run-report.csv\"",
+          });
+          res.end(dryRunReportCsv(summary));
+          return;
+        }
+
+        sendJson(res, 200, {
+          ok: true,
+          summary,
+          logs,
+        });
+        return;
+      }
+
+      const pathCommand = commandFromPathname(requestUrl.pathname);
+      if (
+        req.method === "POST" &&
+        (requestUrl.pathname === "/api/command" || pathCommand !== null)
+      ) {
+        if (pathCommand === undefined) {
+          sendJson(res, 400, { ok: false, error: "Invalid engine command endpoint" });
+          return;
+        }
+
+        if (typeof commandHandler !== "function") {
+          sendJson(res, 503, { ok: false, error: "Engine command handling is not configured" });
+          return;
+        }
+
+        const payload = await readJsonBody(req);
+        let request;
+
+        try {
+          if (pathCommand) {
+            if (payload.command !== undefined) {
+              const bodyRequest = normalizeDashboardCommandPayload(payload);
+              if (bodyRequest.command !== pathCommand) {
+                throw new Error(`Command path ${pathCommand} does not match payload command ${bodyRequest.command}`);
+              }
+              request = bodyRequest;
+            } else {
+              request = normalizeDashboardCommandPayload({ ...payload, command: pathCommand });
+            }
+          } else {
+            request = normalizeDashboardCommandPayload(payload);
+          }
+        } catch (error) {
+          sendJson(res, 400, { ok: false, error: error.message });
+          return;
+        }
+
+        const commandId = crypto.randomUUID();
+        const commandRunMode = request.runMode || (state.runtimeConfig && state.runtimeConfig.runMode);
+        const record = await logStore.append("commands", {
+          type: "dashboard.command",
+          mode: executionLogMode(commandRunMode),
+          engineState: state.engineState || "STOPPED",
+          command: request.command,
+          commandId,
+          runMode: request.runMode,
+          emergency: request.emergency === true,
+          source: "dashboard",
+        });
+        await commandStatusStore.write(commandId, {
+          status: "queued",
+          command: request.command,
+          runMode: request.runMode,
+          emergency: request.emergency === true,
+          source: "dashboard",
+          queuedAt: record.timestamp,
+        });
+
+        commandHandler(request, { commandId, queuedAt: record.timestamp }).catch(async (error) => {
+          await commandStatusStore.write(commandId, {
+            status: "rejected",
+            command: request.command,
+            runMode: request.runMode,
+            emergency: request.emergency === true,
+            source: "dashboard",
+            message: error.message,
+          });
+          await logStore.append("errors", {
+            type: "engine.command.rejected",
+            command: request.command,
+            commandId,
+            runMode: request.runMode,
+            message: error.message,
+          });
+        });
+
+        sendJson(res, 202, {
+          ok: true,
+          command: record.command,
+          commandId: record.commandId,
+          runMode: record.runMode,
+          status: "queued",
+        });
+        return;
+      }
+
+      if (req.method === "GET" && requestUrl.pathname.startsWith("/api/commands/")) {
+        const commandId = requestUrl.pathname.slice("/api/commands/".length);
+        const status = await commandStatusStore.read(commandId);
+
+        if (!status) {
+          sendJson(res, 404, { ok: false, error: "Command status not found" });
+          return;
+        }
+
+        sendJson(res, 200, { ok: true, status });
         return;
       }
 
       if (req.method === "POST" && requestUrl.pathname === "/api/settings") {
-        const payload = await readJsonBody(req);
-
-        if (payload.feeRate !== undefined) {
-          state.setFeeRate(payload.feeRate);
-        }
-
-        if (payload.staleOrderbookMs !== undefined) {
-          const staleOrderbookMs = Number.parseInt(payload.staleOrderbookMs, 10);
-
-          if (!Number.isInteger(staleOrderbookMs) || staleOrderbookMs <= 0) {
-            throw new Error(`Invalid staleOrderbookMs: ${payload.staleOrderbookMs}`);
-          }
-
-          state.staleOrderbookMs = staleOrderbookMs;
-          state.recalculateAll({ markDirty: true });
-        }
-
-        sendJson(res, 200, state.getSnapshot());
+        sendJson(res, 403, {
+          ok: false,
+          error: "Dashboard mutation APIs are disabled. Change config while the engine is stopped and restart it.",
+        });
         return;
       }
 
       if (req.method === "POST" && requestUrl.pathname === "/api/strategy") {
-        const payload = await readJsonBody(req);
-
-        if (typeof state.selectStrategy !== "function") {
-          throw new Error("Strategy selection is not available");
-        }
-
-        state.selectStrategy(payload.strategyId);
-        sendJson(res, 200, state.getSnapshot());
+        sendJson(res, 403, {
+          ok: false,
+          error: "Dashboard strategy mutation is disabled. Select strategies through stopped runtime config only.",
+        });
         return;
       }
 
@@ -190,18 +321,6 @@ function createRequestHandler(options) {
           sseClients.delete(res);
         });
         res.write(`event: state\ndata: ${JSON.stringify(state.getSnapshot())}\n\n`);
-        return;
-      }
-
-      if (req.method === "POST" && requestUrl.pathname === "/api/capture") {
-        const payload = await readJsonBody(req);
-        const saved = await saveCapture(capturesDir, payload);
-
-        sendJson(res, 200, {
-          ok: true,
-          pngPath: path.relative(process.cwd(), saved.pngPath),
-          jsonPath: path.relative(process.cwd(), saved.jsonPath),
-        });
         return;
       }
 
@@ -265,6 +384,12 @@ async function startLiveServer(options = {}) {
   const orderbookBatchSize = Number.parseInt(process.env.UPBIT_ORDERBOOK_BATCH_SIZE || "50", 10);
   const orderbookDelayMs = Number.parseInt(process.env.UPBIT_ORDERBOOK_DELAY_MS || "200", 10);
   const wsMarketsPerConnection = Number.parseInt(process.env.UPBIT_WS_MARKETS_PER_CONNECTION || "100", 10);
+  const logStore = options.logStore || new AppendOnlyLogStore({
+    logDir: options.logDir || path.resolve(process.cwd(), "out", "logs"),
+  });
+  const commandStatusStore = options.commandStatusStore || new CommandStatusStore({
+    runtimeDir: options.runtimeDir || path.resolve(process.cwd(), "out", "runtime"),
+  });
   const runtimeConfig = options.runtimeConfig || loadRuntimeConfig({
     configPath: options.runtimeConfigPath,
     allowLiveTrading: process.env.Q_GAGARIN_ALLOW_LIVE_TRADING === "true",
@@ -273,6 +398,7 @@ async function startLiveServer(options = {}) {
     feeRate: parseFeeRate(process.env.UPBIT_TAKER_FEE_RATE, 0),
     staleOrderbookMs,
     runtimeConfig,
+    logStore,
   });
 
   if (options.state && typeof state.setRuntimeConfig === "function" && !state.runtimeConfig) {
@@ -290,11 +416,97 @@ async function startLiveServer(options = {}) {
   const sseClients = new Set();
   const liveWsClients = new Set();
   const liveWsServer = new WebSocket.Server({ noServer: true });
+  let feedsRunning = false;
+  let wsClient = null;
+  let validationWsClient = null;
+
+  function startFeeds() {
+    if (feedsRunning) return;
+    state.engineState = "RUNNING";
+    wsClient.start();
+    validationWsClient.start();
+    feedsRunning = true;
+  }
+
+  function stopFeeds() {
+    wsClient.stop();
+    validationWsClient.stop();
+    feedsRunning = false;
+  }
+
+  async function applyLocalCommand(request, metadata = {}) {
+    const previousState = state.engineState || "STOPPED";
+
+    if (request.command === "Start") {
+      if (request.runMode === "REAL_GUARDED") {
+        throw new Error("REAL_GUARDED requires the separated engine runtime");
+      }
+
+      if (!["STOPPED", "PAUSED"].includes(previousState)) {
+        throw new Error(`Cannot Start while ${previousState}`);
+      }
+
+      if (request.runMode && typeof state.setRuntimeConfig === "function") {
+        state.setRuntimeConfig({
+          ...state.runtimeConfig,
+          runMode: request.runMode,
+        });
+      }
+
+      startFeeds();
+    } else if (request.command === "Pause") {
+      if (previousState !== "RUNNING") {
+        throw new Error(`Cannot Pause while ${previousState}`);
+      }
+
+      state.engineState = "PAUSED";
+    } else if (request.command === "Stop") {
+      if (!["RUNNING", "PAUSED", "ERROR", "STOPPED"].includes(previousState)) {
+        throw new Error(`Cannot Stop while ${previousState}`);
+      }
+
+      stopFeeds();
+      state.engineState = "STOPPED";
+    }
+
+    const nextState = state.engineState || "STOPPED";
+    const event = await logStore.append("events", {
+      type: "engine.state_changed",
+      mode: executionLogMode(state.runtimeConfig && state.runtimeConfig.runMode),
+      engineState: nextState,
+      command: request.command,
+      previousState,
+      nextState,
+      runMode: state.runtimeConfig && state.runtimeConfig.runMode,
+      commandId: metadata.commandId,
+      source: "combined-live-server",
+    });
+    await commandStatusStore.write(metadata.commandId, {
+      status: "accepted",
+      command: request.command,
+      previousState,
+      nextState,
+      runMode: state.runtimeConfig && state.runtimeConfig.runMode,
+      eventTimestamp: event.timestamp,
+      source: "combined-live-server",
+    });
+    sendWs(liveWsClients, {
+      type: "state",
+      sentAtEpochMs: Date.now(),
+      stateDelta: {
+        engineState: nextState,
+        runtimeConfig: state.runtimeConfig,
+      },
+    });
+  }
+
   const server = http.createServer(createRequestHandler({
     state,
     sseClients,
+    logStore,
+    commandStatusStore,
+    commandHandler: options.commandHandler || applyLocalCommand,
     publicDir: options.publicDir || path.resolve(process.cwd(), "public"),
-    capturesDir: options.capturesDir || path.resolve(process.cwd(), "out", "captures"),
   }));
 
   liveWsServer.on("connection", (socket) => {
@@ -344,11 +556,11 @@ async function startLiveServer(options = {}) {
     });
   });
 
-  const wsClient = options.wsClient || new UpbitWsOrderbookClient(state.requiredMarkets || [], {
+  wsClient = options.wsClient || new UpbitWsOrderbookClient(state.requiredMarkets || [], {
     chunkSize: wsMarketsPerConnection,
     orderbookUnit: runtimeConfig.observationOrderbookUnit,
   });
-  const validationWsClient = options.validationWsClient || new UpbitWsOrderbookClient(state.requiredMarkets || [], {
+  validationWsClient = options.validationWsClient || new UpbitWsOrderbookClient(state.requiredMarkets || [], {
     chunkSize: wsMarketsPerConnection,
     orderbookUnit: runtimeConfig.validationOrderbookUnit,
   });
@@ -423,7 +635,7 @@ async function startLiveServer(options = {}) {
     }, ssePushIntervalMs);
 
     fallbackTimer = setInterval(async () => {
-      if (!state.shouldUseFallback()) {
+      if (state.engineState !== "RUNNING" || !state.shouldUseFallback()) {
         return;
       }
 
@@ -450,9 +662,7 @@ async function startLiveServer(options = {}) {
   });
 
   if (!options.skipFeeds) {
-    state.engineState = "RUNNING";
-    wsClient.start();
-    validationWsClient.start();
+    startFeeds();
   }
   startTimers();
 
@@ -468,8 +678,7 @@ async function startLiveServer(options = {}) {
       if (deltaTimer) clearInterval(deltaTimer);
       if (sseTimer) clearInterval(sseTimer);
       if (fallbackTimer) clearInterval(fallbackTimer);
-      wsClient.stop();
-      validationWsClient.stop();
+      stopFeeds();
       if (state.engineState === "RUNNING") {
         state.engineState = "STOPPED";
       }
@@ -489,6 +698,5 @@ async function startLiveServer(options = {}) {
 
 module.exports = {
   createRequestHandler,
-  saveCapture,
   startLiveServer,
 };
