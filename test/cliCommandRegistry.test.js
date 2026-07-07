@@ -454,6 +454,59 @@ test("CLI system subcommands and exchange view render without browser services",
   assert.match(latency.output, /display\s+affectsTrading\s+no/);
 });
 
+test("CLI pocket commands preview and submit Upbit pocket transfers", async () => {
+  const calls = [];
+  const context = createCliContext({
+    runtimeDir: "/tmp/q-gagarin-cli-pocket",
+    logDir: "/tmp/q-gagarin-cli-pocket/logs",
+    output: memoryOutput(),
+    pocketRestClientFactory(scope, options) {
+      return {
+        scope,
+        options,
+        async getPockets() {
+          calls.push({ scope, method: "getPockets" });
+          return [{ uuid: "sub-pocket-uuid", name: "gagarin", type: "sub" }];
+        },
+        async getAccounts() {
+          calls.push({ scope, method: "getAccounts" });
+          return [{ currency: "KRW", balance: "30000", locked: "0" }];
+        },
+        async getSubPocketAssets(uuid) {
+          calls.push({ scope, method: "getSubPocketAssets", uuid });
+          return [{ currency: "KRW", balance: "10000", locked: "0" }];
+        },
+        async transferFromMainPocket(transfer) {
+          calls.push({ scope, method: "transferFromMainPocket", transfer, live: options.liveTradingEnabled });
+          return { ...transfer, state: "submitted", uuid: "transfer-main-uuid" };
+        },
+        async transferFromSubPocket(transfer) {
+          calls.push({ scope, method: "transferFromSubPocket", transfer, live: options.liveTradingEnabled });
+          return { ...transfer, state: "submitted", uuid: "transfer-sub-uuid" };
+        },
+      };
+    },
+  });
+
+  const list = await runOnce(parseSlashCommand("/pocket list"), context);
+  const currentBalance = await runOnce(parseSlashCommand("/pocket balance"), context);
+  const subBalance = await runOnce(parseSlashCommand("/pocket balance gagarin"), context);
+  const preview = await runOnce(parseSlashCommand("/pocket transfer main-to-sub KRW 30000 --to gagarin"), context);
+  const mainTransfer = await runOnce(parseSlashCommand("/pocket transfer main-to-sub KRW 30000 --to gagarin --yes --identifier pocket-test-main"), context);
+  const subTransfer = await runOnce(parseSlashCommand("/pocket transfer sub-to-main KRW 5000 --yes --identifier pocket-test-sub"), context);
+
+  assert.match(list.output, /gagarin/);
+  assert.match(currentBalance.output, /30000/);
+  assert.match(subBalance.output, /10000/);
+  assert.match(preview.output, /Pocket Transfer Preview/);
+  assert.match(preview.output, /Add --yes/);
+  assert.match(mainTransfer.output, /submitted/);
+  assert.match(mainTransfer.output, /transfer-main-uuid/);
+  assert.match(subTransfer.output, /transfer-sub-uuid/);
+  assert.equal(calls.some((call) => call.method === "transferFromMainPocket" && call.live === true && call.transfer.to === "sub-pocket-uuid"), true);
+  assert.equal(calls.some((call) => call.method === "transferFromSubPocket" && call.live === true && call.transfer.to === undefined), true);
+});
+
 test("CLI contracts renders executed dry-run contract details with optional colors", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-cli-contracts-"));
   const logDir = path.join(dir, "logs");

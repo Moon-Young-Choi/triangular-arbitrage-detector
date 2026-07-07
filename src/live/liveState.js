@@ -437,12 +437,16 @@ class LiveTriangleState {
     this.lastMarketLogAtByKey = new Map();
   }
 
-  setRuntimeConfig(runtimeConfig) {
-    const frozenConfig = freezeRuntimeConfig(runtimeConfig);
+  setRuntimeConfig(runtimeConfig, options = {}) {
+    const frozenConfig = freezeRuntimeConfig(runtimeConfig, {
+      allowLiveTrading: options.allowLiveTrading === true,
+    });
     this.activeStrategy = this.strategyRegistry.get(frozenConfig.activeStrategyId);
     this.runtimeConfig = freezeRuntimeConfig({
       ...frozenConfig,
       activeStrategyId: this.activeStrategy.id,
+    }, {
+      allowLiveTrading: options.allowLiveTrading === true,
     });
   }
 

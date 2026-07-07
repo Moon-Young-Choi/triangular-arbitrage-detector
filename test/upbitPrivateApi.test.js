@@ -251,6 +251,55 @@ test("Upbit REST client permission probe reports scoped failures without secrets
   assert.equal(JSON.stringify(permissions).includes("secret"), false);
 });
 
+test("Upbit REST client supports pocket lookup and guarded transfers", async () => {
+  const calls = [];
+  const client = new UpbitExchangeRestClient({
+    accessKey: "access",
+    secretKey: "secret",
+    liveTradingEnabled: false,
+    client: {
+      async request(request) {
+        calls.push(request);
+        if (request.url === "/pockets") {
+          return { status: 200, data: [{ uuid: "sub-uuid", name: "gagarin" }] };
+        }
+        if (request.url === "/pockets/assets") {
+          return { status: 200, data: [{ currency: "KRW", balance: "30000", locked: "0" }] };
+        }
+        return { status: 201, data: { state: "submitted" } };
+      },
+    },
+  });
+
+  const pockets = await client.getPockets();
+  const assets = await client.getSubPocketAssets("sub-uuid");
+  await assert.rejects(
+    () => client.transferFromMainPocket({ to: "sub-uuid", currency: "KRW", amount: "10000" }),
+    /liveTradingEnabled=false/,
+  );
+
+  client.liveTradingEnabled = true;
+  const mainTransfer = await client.transferFromMainPocket({
+    to: "sub-uuid",
+    currency: "KRW",
+    amount: "10000",
+    identifier: "transfer-main",
+  });
+  const subTransfer = await client.transferFromSubPocket({
+    currency: "KRW",
+    amount: "5000",
+    identifier: "transfer-sub",
+  });
+
+  assert.equal(pockets[0].name, "gagarin");
+  assert.equal(assets[0].balance, "30000");
+  assert.equal(mainTransfer.state, "submitted");
+  assert.equal(subTransfer.state, "submitted");
+  assert.equal(calls.find((call) => call.url === "/pockets/assets").params.uuid, "sub-uuid");
+  assert.equal(calls.some((call) => call.url === "/pockets/universal_transfers" && call.data.identifier === "transfer-main"), true);
+  assert.equal(calls.some((call) => call.url === "/pockets/transfers" && call.data.identifier === "transfer-sub"), true);
+});
+
 test("orders chance and fee policy normalization supports taker and maker fees", () => {
   const normalized = normalizeOrderChance({
     bid_fee: "0.0005",

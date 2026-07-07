@@ -4,7 +4,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { buildPerformanceBudgetSnapshot, EngineRuntime } = require("../src/engine/engineRuntime");
-const { DEFAULT_RUNTIME_CONFIG } = require("../src/core/runtimeConfig");
+const { DEFAULT_RUNTIME_CONFIG, freezeRuntimeConfig } = require("../src/core/runtimeConfig");
 const { AppendOnlyLogStore } = require("../src/core/appendOnlyLog");
 const { CommandInbox } = require("../src/core/commandInbox");
 const { CommandStatusStore } = require("../src/core/commandStatusStore");
@@ -69,6 +69,17 @@ function fakeState() {
         observation: { marketCount: 0, staleCount: 0 },
         validation: { marketCount: 0, staleCount: 0 },
       };
+    },
+  };
+}
+
+function validatingFakeState() {
+  return {
+    ...fakeState(),
+    setRuntimeConfig(config, options = {}) {
+      this.runtimeConfig = freezeRuntimeConfig(config, {
+        allowLiveTrading: options.allowLiveTrading === true,
+      });
     },
   };
 }
@@ -633,6 +644,154 @@ test("engine runtime derives live trading from env only for real run modes", asy
   }
 });
 
+test("engine runtime does not partially switch to real mode when allow gate is missing", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-live-env-missing-"));
+  const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
+  const previousAllowLiveTrading = process.env.Q_GAGARIN_ALLOW_LIVE_TRADING;
+  const previousLiveTradingEnabled = process.env.Q_GAGARIN_LIVE_TRADING_ENABLED;
+  const state = validatingFakeState();
+
+  await logStore.ensureFiles();
+  delete process.env.Q_GAGARIN_ALLOW_LIVE_TRADING;
+  process.env.Q_GAGARIN_LIVE_TRADING_ENABLED = "true";
+
+  try {
+    const runtime = new EngineRuntime({
+      runtimeDir: dir,
+      logStore,
+      commandStatusStore: new CommandStatusStore({ runtimeDir: dir }),
+      state,
+      runtimeConfig: DEFAULT_RUNTIME_CONFIG,
+      restClient: {
+        liveTradingEnabled: false,
+        mode: "OBSERVE",
+      },
+      observationClient: fakeWsClient(),
+      validationClient: fakeWsClient(),
+      startedAtEpochMs: Date.now() - 1000,
+    });
+
+    assert.throws(
+      () => runtime.setRunMode("REAL_GUARDED"),
+      /liveTradingEnabled requires an explicit allowLiveTrading gate/,
+    );
+
+    assert.equal(runtime.runtimeConfig.runMode, "OBSERVE");
+    assert.equal(runtime.runtimeConfig.liveTradingEnabled, false);
+    assert.equal(state.runtimeConfig.runMode, "OBSERVE");
+    assert.equal(runtime.restClient.liveTradingEnabled, false);
+    assert.equal(runtime.restClient.mode, "OBSERVE");
+  } finally {
+    if (previousAllowLiveTrading === undefined) {
+      delete process.env.Q_GAGARIN_ALLOW_LIVE_TRADING;
+    } else {
+      process.env.Q_GAGARIN_ALLOW_LIVE_TRADING = previousAllowLiveTrading;
+    }
+
+    if (previousLiveTradingEnabled === undefined) {
+      delete process.env.Q_GAGARIN_LIVE_TRADING_ENABLED;
+    } else {
+      process.env.Q_GAGARIN_LIVE_TRADING_ENABLED = previousLiveTradingEnabled;
+    }
+  }
+});
+
+test("engine runtime rolls back config when start command is rejected by state machine", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-live-env-rollback-"));
+  const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
+  const previousAllowLiveTrading = process.env.Q_GAGARIN_ALLOW_LIVE_TRADING;
+  const previousLiveTradingEnabled = process.env.Q_GAGARIN_LIVE_TRADING_ENABLED;
+  const state = validatingFakeState();
+
+  await logStore.ensureFiles();
+  process.env.Q_GAGARIN_ALLOW_LIVE_TRADING = "true";
+  process.env.Q_GAGARIN_LIVE_TRADING_ENABLED = "true";
+
+  try {
+    const runtime = new EngineRuntime({
+      runtimeDir: dir,
+      logStore,
+      commandStatusStore: new CommandStatusStore({ runtimeDir: dir }),
+      state,
+      runtimeConfig: DEFAULT_RUNTIME_CONFIG,
+      restClient: {
+        liveTradingEnabled: false,
+        mode: "OBSERVE",
+      },
+      observationClient: fakeWsClient(),
+      validationClient: fakeWsClient(),
+      startedAtEpochMs: Date.now() - 1000,
+    });
+
+    runtime.machine.state = "RUNNING";
+    state.engineState = "RUNNING";
+
+    await assert.rejects(
+      () => runtime.applyCommand("Start", { runMode: "REAL_GUARDED", source: "test" }),
+      /Cannot Start while RUNNING/,
+    );
+
+    assert.equal(runtime.runtimeConfig.runMode, "OBSERVE");
+    assert.equal(runtime.runtimeConfig.liveTradingEnabled, false);
+    assert.equal(state.runtimeConfig.runMode, "OBSERVE");
+    assert.equal(runtime.restClient.liveTradingEnabled, false);
+    assert.equal(runtime.restClient.mode, "OBSERVE");
+  } finally {
+    if (previousAllowLiveTrading === undefined) {
+      delete process.env.Q_GAGARIN_ALLOW_LIVE_TRADING;
+    } else {
+      process.env.Q_GAGARIN_ALLOW_LIVE_TRADING = previousAllowLiveTrading;
+    }
+
+    if (previousLiveTradingEnabled === undefined) {
+      delete process.env.Q_GAGARIN_LIVE_TRADING_ENABLED;
+    } else {
+      process.env.Q_GAGARIN_LIVE_TRADING_ENABLED = previousLiveTradingEnabled;
+    }
+  }
+});
+
+test("engine runtime snapshots use runtime config as the single mode source", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-snapshot-config-"));
+  const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
+  const state = fakeState();
+
+  state.runtimeConfig = {
+    ...DEFAULT_RUNTIME_CONFIG,
+    runMode: "OBSERVE",
+    liveTradingEnabled: false,
+  };
+
+  await logStore.ensureFiles();
+  const runtime = new EngineRuntime({
+    runtimeDir: dir,
+    logStore,
+    commandStatusStore: new CommandStatusStore({ runtimeDir: dir }),
+    state,
+    runtimeConfig: {
+      ...DEFAULT_RUNTIME_CONFIG,
+      runMode: "REAL_GUARDED",
+      liveTradingEnabled: true,
+    },
+    restClient: {
+      liveTradingEnabled: true,
+      mode: "REAL",
+    },
+    observationClient: fakeWsClient(),
+    validationClient: fakeWsClient(),
+    startedAtEpochMs: Date.now() - 1000,
+  });
+  runtime.machine.state = "STOPPED";
+
+  const snapshot = runtime.snapshot();
+
+  assert.equal(snapshot.runtimeConfig.runMode, "REAL_GUARDED");
+  assert.equal(snapshot.runtimeConfig.liveTradingEnabled, true);
+  assert.equal(snapshot.execution.mode, "REAL_GUARDED");
+  assert.equal(snapshot.execution.liveTradingEnabled, true);
+  assert.equal(snapshot.engineState, "STOPPED");
+});
+
 test("engine runtime gates REAL_AUTO start with readiness checks", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-real-auto-gate-"));
   const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
@@ -879,6 +1038,83 @@ test("engine runtime refreshes fee policies for required markets and injects liv
   assert.equal(snapshot.privateCacheStatus.marketPolicyMarketCount, 2);
   assert.equal(snapshot.privateCacheStatus.marketPolicyByMarket["KRW-BTC"].bidMinTotal, 5000);
   assert.deepEqual(snapshot.privateCacheStatus.feePolicyLoadErrors, []);
+});
+
+test("engine runtime timestamps order chance and account caches after long refreshes finish", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-fee-policy-long-refresh-"));
+  const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
+  const originalNow = Date.now;
+  let nowMs = 1_000;
+  let accountReads = 0;
+
+  await logStore.ensureFiles();
+  Date.now = () => nowMs;
+
+  try {
+    const runtime = new EngineRuntime({
+      runtimeDir: dir,
+      logStore,
+      commandStatusStore: new CommandStatusStore({ runtimeDir: dir }),
+      state: {
+        ...fakeState(),
+        requiredMarkets: ["KRW-BTC", "BTC-ETH"],
+      },
+      runtimeConfig: {
+        ...DEFAULT_RUNTIME_CONFIG,
+        executionPolicy: {
+          ...DEFAULT_RUNTIME_CONFIG.executionPolicy,
+          executionGuards: {
+            ...DEFAULT_RUNTIME_CONFIG.executionPolicy.executionGuards,
+            orderChanceTtlMs: 30000,
+            accountBalanceTtlMs: 30000,
+          },
+        },
+      },
+      restClient: {
+        async checkPermissions() {
+          return {
+            viewAccounts: true,
+            viewOrdersChance: true,
+            accounts: [{ currency: "KRW", balance: "30000", locked: "0" }],
+            errors: [],
+          };
+        },
+        async getAccounts() {
+          accountReads += 1;
+          return [{ currency: "KRW", balance: "30000", locked: "0" }];
+        },
+        async getOrderChance(market) {
+          nowMs += 31_000;
+          return {
+            market: {
+              id: market,
+              bid: { minTotal: "5000" },
+              ask: { minTotal: "5000" },
+            },
+            bidFee: 0.0005,
+            askFee: 0.0005,
+            makerBidFee: 0.0005,
+            makerAskFee: 0.0005,
+          };
+        },
+      },
+      observationClient: fakeWsClient(),
+      validationClient: fakeWsClient(),
+      startedAtEpochMs: 0,
+    });
+
+    await runtime.refreshPrivateCaches();
+    const snapshot = runtime.snapshot();
+
+    assert.equal(runtime.isOrderChanceFresh(), true);
+    assert.equal(runtime.isAccountBalanceFresh(), true);
+    assert.equal(snapshot.privateCacheStatus.orderChanceTimestampFresh, true);
+    assert.equal(snapshot.privateCacheStatus.orderChanceFresh, true);
+    assert.equal(snapshot.privateCacheStatus.accountBalanceFresh, true);
+    assert.equal(accountReads, 1);
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 test("engine runtime marks order chance stale when any required market policy is missing", async () => {

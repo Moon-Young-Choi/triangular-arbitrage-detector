@@ -186,6 +186,39 @@ const COMMAND_COMPLETIONS = {
     },
     options: [entry("--draft", "Use draft config")],
   },
+  "/pocket": {
+    argsByPosition: [[
+      entry("list", "List pockets with a main-pocket management key"),
+      entry("balance", "Show current or selected sub-pocket balances"),
+      entry("transfer", "Move assets between main and sub pockets"),
+    ]],
+    argsByFirstArg: {
+      transfer: {
+        1: [
+          entry("main-to-sub", "Move asset from main pocket to a sub pocket"),
+          entry("sub-to-main", "Move asset from the current sub pocket to main"),
+        ],
+        2: START_ASSETS.map((asset) => entry(asset, "Asset currency")),
+        3: [
+          entry("10000", "Transfer amount"),
+          entry("30000", "Transfer amount"),
+        ],
+      },
+    },
+    options: [
+      entry("--to", "Destination pocket UUID or name"),
+      entry("--from", "Source pocket UUID or name for main-pocket universal transfers"),
+      entry("--uuid", "Sub-pocket UUID or name for balance lookup"),
+      entry("--currency", "Asset currency"),
+      entry("--amount", "Transfer amount"),
+      entry("--identifier", "Client identifier for idempotency"),
+      entry("--yes", "Submit the transfer to Upbit"),
+    ],
+    optionValues: {
+      currency: START_ASSETS.map((asset) => entry(asset, "Asset currency")),
+      amount: [entry("10000", "Transfer amount"), entry("30000", "Transfer amount")],
+    },
+  },
   "/opportunity": {
     argsByPosition: [[
       entry("show", "Show selected desk opportunity"),

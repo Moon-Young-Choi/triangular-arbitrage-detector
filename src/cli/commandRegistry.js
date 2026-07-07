@@ -7,6 +7,7 @@ const { replayDryRunReport } = require("../replay/replayEngine");
 const { createStrategyRegistry } = require("../strategies/registry");
 const { createTelemetryReadModel } = require("../ops/telemetryReadModel");
 const { createCommandQueue } = require("../ops/commandQueue");
+const { UpbitExchangeRestClient } = require("../exchanges/upbit/exchangeRestClient");
 const {
   DEFAULT_DRAFT_CONFIG_PATH,
   baseDraftConfig,
@@ -37,6 +38,7 @@ const COMMANDS = [
   ["/latency", "Show latency/performance budget"],
   ["/execution", "Show execution balances, contracts, orders, fills, and guards"],
   ["/balances", "Show dry-run and real balance snapshots"],
+  ["/pocket list|balance|transfer", "Inspect Upbit pockets or transfer assets between main/sub pockets"],
   ["/contracts [--follow] [--mode DRY_RUN|REAL]", "Show executed dry-run/real contract details"],
   ["/logs [--kind events|decisions|orders|fills|errors] [--follow]", "Read append-only logs"],
   ["/dryrun report [--format json|csv]", "Show dry-run review report"],
@@ -75,7 +77,10 @@ function createCliContext(options = {}) {
     commandStatusStore,
     strategyRegistry: options.strategyRegistry || createStrategyRegistry(),
     configPath,
+    runtimeDir,
+    logDir,
     draftConfigPath,
+    pocketRestClientFactory: options.pocketRestClientFactory || null,
     output: options.output || process.stdout,
     errorOutput: options.errorOutput || process.stderr,
     pollIntervalMs: options.pollIntervalMs || 250,
@@ -544,6 +549,207 @@ function sanitizeLegacyBrowserMetrics(metrics = {}) {
 
 function jsonForDisplay(value) {
   return JSON.stringify(value, null, 2);
+}
+
+function normalizeAssetCode(value) {
+  const asset = String(value || "").trim().toUpperCase();
+  if (!asset) throw new Error("Asset currency is required");
+  if (!/^[A-Z0-9]{2,20}$/u.test(asset)) throw new Error(`Invalid asset currency: ${value}`);
+  return asset;
+}
+
+function normalizeTransferAmount(value) {
+  const text = String(value || "").trim();
+  const numeric = Number(text);
+  if (!text || !Number.isFinite(numeric) || numeric <= 0) {
+    throw new Error(`Invalid transfer amount: ${value}`);
+  }
+  return text;
+}
+
+function generatePocketTransferIdentifier(direction, currency) {
+  const random = Math.random().toString(36).slice(2, 10);
+  return `qg.${direction}.${currency}.${Date.now()}.${random}`.slice(0, 64);
+}
+
+function isUuidLike(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(String(value || ""));
+}
+
+function createPocketRestClient(context, scope, options = {}) {
+  if (context.pocketRestClientFactory) {
+    return context.pocketRestClientFactory(scope, options);
+  }
+
+  const useMainCredentials = scope === "main";
+  const accessKey = useMainCredentials
+    ? process.env.UPBIT_MAIN_ACCESS_KEY || process.env.UPBIT_ACCESS_KEY
+    : process.env.UPBIT_ACCESS_KEY;
+  const secretKey = useMainCredentials
+    ? process.env.UPBIT_MAIN_SECRET_KEY || process.env.UPBIT_SECRET_KEY
+    : process.env.UPBIT_SECRET_KEY;
+
+  return new UpbitExchangeRestClient({
+    accessKey,
+    secretKey,
+    liveTradingEnabled: options.liveTradingEnabled === true,
+  });
+}
+
+function normalizePocketRows(pockets = []) {
+  return (Array.isArray(pockets) ? pockets : []).map((pocket) => ({
+    uuid: pocket.uuid || pocket.id || pocket.pocket_uuid || pocket.pocketUuid || "",
+    name: pocket.name || pocket.pocket_name || pocket.pocketName || "",
+    type: pocket.type || pocket.pocket_type || pocket.pocketType || "",
+    raw: pocket,
+  }));
+}
+
+async function resolvePocketUuid(selector, client) {
+  const target = String(selector || "").trim();
+  if (!target) return "";
+  if (isUuidLike(target)) return target;
+
+  const pockets = normalizePocketRows(await client.getPockets());
+  const match = pockets.find((pocket) => (
+    pocket.uuid === target ||
+    String(pocket.name || "").toLowerCase() === target.toLowerCase()
+  ));
+  if (!match) throw new Error(`Pocket not found: ${target}`);
+  return match.uuid;
+}
+
+function renderAccountsTable(title, accounts = []) {
+  const rows = (Array.isArray(accounts) ? accounts : []).map((account) => [
+    account.currency || account.asset || "-",
+    formatNumber(account.balance ?? account.availableBalance),
+    formatNumber(account.locked ?? account.lockedBalance),
+    account.avg_buy_price ?? account.avgBuyPrice ?? "-",
+    account.unit_currency ?? account.unitCurrency ?? "-",
+  ]);
+
+  return [
+    title,
+    rows.length > 0
+      ? renderTable(["Asset", "Available", "Locked", "Avg", "Unit"], rows)
+      : "No balances returned.",
+  ].join("\n");
+}
+
+function renderPocketTransferResult(result = {}, request = {}) {
+  return [
+    "Pocket Transfer",
+    renderKeyValues([
+      ["State", result.state || result.status || "submitted"],
+      ["Currency", result.currency || request.currency],
+      ["Amount", result.amount || request.amount],
+      ["From", result.from || request.from || "-"],
+      ["To", result.to || request.to || "main"],
+      ["Identifier", result.identifier || request.identifier || "-"],
+      ["UUID", result.uuid || "-"],
+    ]),
+  ].join("\n");
+}
+
+async function handlePocketCommand(parsed, context) {
+  const action = parsed.args[0] || "list";
+
+  if (action === "list") {
+    const client = createPocketRestClient(context, "main", { liveTradingEnabled: false });
+    const pockets = normalizePocketRows(await client.getPockets());
+    return [
+      "Upbit Pockets",
+      pockets.length > 0
+        ? renderTable(["UUID", "Name", "Type"], pockets.map((pocket) => [pocket.uuid, pocket.name || "-", pocket.type || "-"]))
+        : "No pockets returned.",
+    ].join("\n");
+  }
+
+  if (action === "balance" || action === "balances") {
+    const selector = parsed.options.uuid || parsed.options.pocket || parsed.args[1] || "";
+    if (selector) {
+      const client = createPocketRestClient(context, "main", { liveTradingEnabled: false });
+      const uuid = await resolvePocketUuid(selector, client);
+      return renderAccountsTable(`Sub Pocket Balance ${uuid}`, await client.getSubPocketAssets(uuid));
+    }
+
+    const client = createPocketRestClient(context, "sub", { liveTradingEnabled: false });
+    return renderAccountsTable("Current Pocket Balance", await client.getAccounts());
+  }
+
+  if (action !== "transfer") {
+    throw new Error(`Unknown pocket action: ${action}`);
+  }
+
+  const direction = String(parsed.args[1] || parsed.options.direction || "").toLowerCase();
+  if (!direction) {
+    throw new Error("/pocket transfer requires main-to-sub or sub-to-main");
+  }
+
+  const currency = normalizeAssetCode(parsed.options.currency || parsed.args[2]);
+  const amount = normalizeTransferAmount(parsed.options.amount || parsed.args[3]);
+  const confirmed = parsed.options.yes === true;
+  const identifier = String(parsed.options.identifier || generatePocketTransferIdentifier(direction, currency));
+
+  if (direction === "main-to-sub" || direction === "main2sub") {
+    const client = createPocketRestClient(context, "main", { liveTradingEnabled: confirmed });
+    const target = parsed.options.to || process.env.UPBIT_SUB_POCKET_UUID || process.env.UPBIT_SUB_POCKET_NAME || "";
+    if (!target) throw new Error("main-to-sub requires --to <subPocketUuid|name> or UPBIT_SUB_POCKET_UUID");
+    const transfer = {
+      to: await resolvePocketUuid(target, client),
+      currency,
+      amount,
+      identifier,
+    };
+    if (parsed.options.from) transfer.from = await resolvePocketUuid(parsed.options.from, client);
+
+    if (!confirmed) {
+      return [
+        "Pocket Transfer Preview",
+        renderKeyValues([
+          ["Direction", "main-to-sub"],
+          ["Currency", transfer.currency],
+          ["Amount", transfer.amount],
+          ["To", transfer.to],
+          ["Identifier", transfer.identifier],
+        ]),
+        "Add --yes to submit this transfer to Upbit.",
+      ].join("\n");
+    }
+
+    return renderPocketTransferResult(await client.transferFromMainPocket(transfer), transfer);
+  }
+
+  if (direction === "sub-to-main" || direction === "sub2main") {
+    const client = createPocketRestClient(context, "sub", { liveTradingEnabled: confirmed });
+    const transfer = {
+      currency,
+      amount,
+      identifier,
+    };
+    if (parsed.options.to) {
+      const mainClient = createPocketRestClient(context, "main", { liveTradingEnabled: false });
+      transfer.to = await resolvePocketUuid(parsed.options.to, mainClient);
+    }
+
+    if (!confirmed) {
+      return [
+        "Pocket Transfer Preview",
+        renderKeyValues([
+          ["Direction", "sub-to-main"],
+          ["Currency", transfer.currency],
+          ["Amount", transfer.amount],
+          ["To", transfer.to || "main"],
+          ["Identifier", transfer.identifier],
+        ]),
+        "Add --yes to submit this transfer to Upbit.",
+      ].join("\n");
+    }
+
+    return renderPocketTransferResult(await client.transferFromSubPocket(transfer), transfer);
+  }
+
+  throw new Error(`Unknown pocket transfer direction: ${direction}`);
 }
 
 function csvEscape(value) {
@@ -1141,6 +1347,10 @@ async function runOnce(parsed, context) {
 
   if (parsed.name === "replay") {
     return { exit: false, output: await handleReplayCommand(parsed, context) };
+  }
+
+  if (parsed.name === "pocket") {
+    return { exit: false, output: await handlePocketCommand(parsed, context) };
   }
 
   if (parsed.name === "export") {

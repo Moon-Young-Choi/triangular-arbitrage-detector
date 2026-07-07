@@ -87,6 +87,10 @@ function summarizeRestPayload(payload) {
     "ask_fee",
     "maker_bid_fee",
     "maker_ask_fee",
+    "from",
+    "to",
+    "currency",
+    "amount",
   ]);
 
   if (payload.market && typeof payload.market === "object") {
@@ -252,6 +256,21 @@ class UpbitExchangeRestClient {
     });
   }
 
+  async getPockets() {
+    return this.request("GET", "/pockets", {
+      priority: "normal",
+      rateLimitGroup: "exchange.default",
+    });
+  }
+
+  async getSubPocketAssets(uuid) {
+    return this.request("GET", "/pockets/assets", {
+      params: { uuid },
+      priority: "normal",
+      rateLimitGroup: "exchange.default",
+    });
+  }
+
   async getOrderChance(market) {
     const cached = this.chanceCache.get(market);
     const now = Date.now();
@@ -288,6 +307,30 @@ class UpbitExchangeRestClient {
 
     return this.request("DELETE", "/order", {
       params,
+      priority: "critical",
+      rateLimitGroup: "exchange.default",
+    });
+  }
+
+  async transferFromMainPocket(transfer) {
+    if (!this.liveTradingEnabled) {
+      this.refuseTradingMutation("transferFromMainPocket", "POST", "/pockets/universal_transfers", transfer, "body");
+    }
+
+    return this.request("POST", "/pockets/universal_transfers", {
+      body: transfer,
+      priority: "critical",
+      rateLimitGroup: "exchange.default",
+    });
+  }
+
+  async transferFromSubPocket(transfer) {
+    if (!this.liveTradingEnabled) {
+      this.refuseTradingMutation("transferFromSubPocket", "POST", "/pockets/transfers", transfer, "body");
+    }
+
+    return this.request("POST", "/pockets/transfers", {
+      body: transfer,
       priority: "critical",
       rateLimitGroup: "exchange.default",
     });

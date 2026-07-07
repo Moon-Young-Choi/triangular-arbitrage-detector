@@ -815,17 +815,26 @@ class EngineRuntime {
 
     const liveTradingEnabled = requestedRunMode.startsWith("REAL_") &&
       process.env.Q_GAGARIN_LIVE_TRADING_ENABLED === "true";
+    const allowLiveTrading = process.env.Q_GAGARIN_ALLOW_LIVE_TRADING === "true";
 
-    this.runtimeConfig = freezeRuntimeConfig({
+    const nextConfig = freezeRuntimeConfig({
       ...this.runtimeConfig,
       runMode: requestedRunMode,
       liveTradingEnabled,
     }, {
-      allowLiveTrading: process.env.Q_GAGARIN_ALLOW_LIVE_TRADING === "true",
+      allowLiveTrading,
     });
-    this.state.setRuntimeConfig(this.runtimeConfig);
+
+    this.state.setRuntimeConfig(nextConfig, { allowLiveTrading });
+    this.runtimeConfig = nextConfig;
     this.syncExecutionClients();
     return this.runtimeConfig.runMode;
+  }
+
+  restoreRuntimeConfig(config) {
+    this.state.setRuntimeConfig(config, { allowLiveTrading: true });
+    this.runtimeConfig = config;
+    this.syncExecutionClients();
   }
 
   syncExecutionClients() {
@@ -862,8 +871,7 @@ class EngineRuntime {
       nextState = this.machine.apply(command);
     } catch (error) {
       if (configChanged) {
-        this.runtimeConfig = previousConfig;
-        this.state.setRuntimeConfig(previousConfig);
+        this.restoreRuntimeConfig(previousConfig);
       }
       throw error;
     }
@@ -1185,28 +1193,33 @@ class EngineRuntime {
       };
     }
 
-    const loadedAtMs = Date.now();
     const ttlMs = this.runtimeConfig.executionPolicy.executionGuards.orderChanceTtlMs;
+    const loadedChances = [];
 
     for (const market of markets) {
       try {
         const chance = await this.restClient.getOrderChance(market);
-        const policy = normalizeFeePolicy({
-          ...chance,
-          loadedAt: new Date(loadedAtMs).toISOString(),
-          expiresAt: new Date(loadedAtMs + ttlMs).toISOString(),
-        });
-        this.feePolicyByMarket.set(market, policy);
-        this.marketPolicyByMarket.set(market, policyForMarket(market, {
-          ...chance,
-          source: chance.source || "orders/chance",
-        }));
+        loadedChances.push({ market, chance });
       } catch (error) {
         this.feePolicyLoadErrors.push({
           market,
           message: error.message,
         });
       }
+    }
+
+    const loadedAtMs = Date.now();
+    for (const { market, chance } of loadedChances) {
+      const policy = normalizeFeePolicy({
+        ...chance,
+        loadedAt: new Date(loadedAtMs).toISOString(),
+        expiresAt: new Date(loadedAtMs + ttlMs).toISOString(),
+      });
+      this.feePolicyByMarket.set(market, policy);
+      this.marketPolicyByMarket.set(market, policyForMarket(market, {
+        ...chance,
+        source: chance.source || "orders/chance",
+      }));
     }
 
     if (typeof this.state.setFeePolicyByMarket === "function") {
@@ -1287,6 +1300,11 @@ class EngineRuntime {
     );
   }
 
+  updateAccountBalances(accounts = [], updatedAtMs = Date.now()) {
+    this.balanceTracker.updateFromAccounts(accounts || []);
+    this.accountBalanceUpdatedAt = updatedAtMs;
+  }
+
   async refreshPrivateCaches() {
     if (!this.restClient) {
       this.restPermissions = {
@@ -1303,12 +1321,20 @@ class EngineRuntime {
 
     const now = Date.now();
     if (this.restPermissions.viewAccounts) {
-      this.balanceTracker.updateFromAccounts(this.restPermissions.accounts || []);
-      this.accountBalanceUpdatedAt = now;
+      this.updateAccountBalances(this.restPermissions.accounts || [], now);
     }
 
     if (this.restPermissions.viewOrdersChance) {
       await this.refreshFeePolicies();
+    }
+
+    if (this.restPermissions.viewAccounts) {
+      let accounts = this.restPermissions.accounts || [];
+      if (typeof this.restClient.getAccounts === "function") {
+        accounts = await this.restClient.getAccounts();
+        this.restPermissions.accounts = accounts;
+      }
+      this.updateAccountBalances(accounts, Date.now());
     }
 
     return this.restPermissions;
@@ -1611,6 +1637,8 @@ class EngineRuntime {
 
     return {
       ...snapshot,
+      runtimeConfig: this.runtimeConfig,
+      engineState: this.machine.state,
       engine: this.machine.snapshot(),
       engineProcess: {
         pid: process.pid,
@@ -1642,12 +1670,12 @@ class EngineRuntime {
       realRunLimits: this.realRunLimits.snapshot(),
       performanceBudget: buildPerformanceBudgetSnapshot(this.runtimeConfig),
       execution: {
-        mode: this.runtimeConfig.runMode,
-        liveTradingEnabled: this.runtimeConfig.liveTradingEnabled,
+        ...this.fillTracker.snapshot(),
         dryRunBalances: this.dryRunExecutor.balances,
         dryRunCapital: this.dryRunExecutor.capitalSnapshot(),
         realBalances: this.balanceTracker.snapshot(),
-        ...this.fillTracker.snapshot(),
+        mode: this.runtimeConfig.runMode,
+        liveTradingEnabled: this.runtimeConfig.liveTradingEnabled,
       },
     };
   }
@@ -1688,12 +1716,12 @@ class EngineRuntime {
       realRunLimits: this.realRunLimits.snapshot(nowMs),
       performanceBudget: buildPerformanceBudgetSnapshot(this.runtimeConfig),
       execution: {
-        mode: this.runtimeConfig.runMode,
-        liveTradingEnabled: this.runtimeConfig.liveTradingEnabled,
+        ...this.fillTracker.snapshot(),
         dryRunBalances: this.dryRunExecutor.balances,
         dryRunCapital: this.dryRunExecutor.capitalSnapshot(),
         realBalances: this.balanceTracker.snapshot(),
-        ...this.fillTracker.snapshot(),
+        mode: this.runtimeConfig.runMode,
+        liveTradingEnabled: this.runtimeConfig.liveTradingEnabled,
       },
       eventLog: this.state.eventLog.slice(-200),
     };
