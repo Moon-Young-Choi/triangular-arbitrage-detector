@@ -88,6 +88,13 @@ function buildExecutionPlan(options = {}) {
     latencyMs: row.latency && row.latency.estimatedEndToDisplayMs,
     executableStartAmount: row.executableStartAmount,
     maxExecutableStartAmount: row.maxExecutableStartAmount,
+    sizingMode: row.sizingMode,
+    sizingReason: row.sizingReason,
+    sizingLiquidityStartAmount: row.sizingLiquidityStartAmount,
+    sizingLegs: row.sizingLegs,
+    recoverOnRepriceLoss: options.recoverOnRepriceLoss === true ||
+      row.recoverOnRepriceLoss === true ||
+      (config.executionPolicy && config.executionPolicy.recoverOnRepriceLoss === true),
     limitingLeg: row.limitingLeg,
     limitingMarket: row.limitingMarket,
     expectedSlippageBps: row.expectedSlippageBps,

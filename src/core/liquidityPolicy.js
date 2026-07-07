@@ -1,4 +1,5 @@
 const DEFAULT_VALIDATION_CONFIG = Object.freeze({
+  sizingMode: "configured",
   startAmountByAsset: Object.freeze({
     KRW: 10000,
     BTC: 0.0002,
@@ -39,6 +40,9 @@ function mergeValidationConfig(config = {}) {
     minResidualAbsoluteByAsset: {
       ...DEFAULT_VALIDATION_CONFIG.minResidualAbsoluteByAsset,
       ...(config.minResidualAbsoluteByAsset || {}),
+    },
+    maxStartAmountByAsset: {
+      ...(config.maxStartAmountByAsset || {}),
     },
   };
 }

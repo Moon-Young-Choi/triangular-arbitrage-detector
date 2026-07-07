@@ -131,6 +131,42 @@ test("stale detection identifies missing, old, and fresh orderbooks", () => {
   assert.equal(getCycleFreshness(targetCycle, freshOrderbooks, 5000, now).status, "available");
 });
 
+test("cycle freshness allows quiet WS-confirmed markets but excludes REST-only markets", () => {
+  const targetCycle = {
+    markets: ["KRW-BTC", "BTC-ETH", "KRW-ETH"],
+  };
+  const now = 10000;
+  const quietOrderbooks = new Map(
+    targetCycle.markets.map((market) => [market, {
+      market,
+      timestamp: 1000,
+      receivedAt: 1000,
+      sourceState: "ws_confirmed",
+      wsConfirmed: true,
+      firstWsReceivedAt: 1000,
+      lastWsReceivedAt: 1000,
+    }]),
+  );
+  const quiet = getCycleFreshness(targetCycle, quietOrderbooks, 5000, now);
+
+  assert.equal(quiet.status, "available");
+  assert.deepEqual(quiet.quietMarkets, targetCycle.markets);
+
+  const restOnlyOrderbooks = new Map(
+    targetCycle.markets.map((market) => [market, {
+      market,
+      timestamp: 9000,
+      receivedAt: 9000,
+      streamType: "REST",
+      sourceState: "rest_only",
+    }]),
+  );
+  const restOnly = getCycleFreshness(targetCycle, restOnlyOrderbooks, 5000, now);
+
+  assert.equal(restOnly.status, "unavailable");
+  assert.match(restOnly.unavailableReason, /REST-only orderbook/);
+});
+
 test("x-axis clamp keeps ranges inside the plotted cycle domain", () => {
   assert.deepEqual(clampRange([-10, 10], 0.25, 3.75), [0.25, 3.75]);
   assert.deepEqual(clampRange([-1, 1], 0.25, 3.75), [0.25, 2.25]);

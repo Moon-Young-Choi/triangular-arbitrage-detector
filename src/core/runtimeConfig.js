@@ -14,6 +14,7 @@ const RUN_MODES = new Set(["OBSERVE", "DRY_RUN", "REAL_GUARDED", "REAL_AUTO"]);
 const START_ASSETS = new Set(["KRW", "BTC", "USDT"]);
 const EXECUTION_MODES = EXECUTION_MODE_SET;
 const PARTIAL_FILL_POLICIES = PARTIAL_FILL_POLICY_SET;
+const SIZING_MODES = new Set(["configured", "best-level-residual"]);
 
 const DEFAULT_RUNTIME_CONFIG = {
   runMode: "OBSERVE",
@@ -28,6 +29,7 @@ const DEFAULT_RUNTIME_CONFIG = {
   executionPolicy: {
     stopPolicy: "CANCEL_OPEN_ORDERS",
     partialFillPolicy: DEFAULT_PARTIAL_FILL_POLICY,
+    recoverOnRepriceLoss: true,
     allowBestIoc: false,
     simulatedBalances: {
       KRW: 1000000,
@@ -74,6 +76,7 @@ const DEFAULT_RUNTIME_CONFIG = {
     },
   },
   candidateValidation: {
+    sizingMode: "configured",
     startAmountByAsset: {
       KRW: 10000,
       BTC: 0.0002,
@@ -102,6 +105,21 @@ function cloneJson(value) {
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function mergePlainObjectDefaults(defaults, overrides) {
+  if (overrides === undefined) return cloneJson(defaults);
+  if (!isPlainObject(defaults) || !isPlainObject(overrides)) return cloneJson(overrides);
+
+  const merged = cloneJson(defaults);
+  for (const [key, value] of Object.entries(overrides)) {
+    merged[key] = mergePlainObjectDefaults(defaults[key], value);
+  }
+  return merged;
+}
+
+function mergeRuntimeConfigDefaults(input) {
+  return mergePlainObjectDefaults(DEFAULT_RUNTIME_CONFIG, input || {});
 }
 
 function deepFreeze(value) {
@@ -218,6 +236,10 @@ function validateRuntimeConfig(input, options = {}) {
     throw new Error(`Invalid executionPolicy.partialFillPolicy: ${config.executionPolicy.partialFillPolicy}`);
   }
 
+  if (typeof config.executionPolicy.recoverOnRepriceLoss !== "boolean") {
+    throw new Error("executionPolicy.recoverOnRepriceLoss must be a boolean");
+  }
+
   if (typeof config.executionPolicy.allowBestIoc !== "boolean") {
     throw new Error("executionPolicy.allowBestIoc must be a boolean");
   }
@@ -276,8 +298,15 @@ function validateRuntimeConfig(input, options = {}) {
     throw new Error("candidateValidation must be an object");
   }
 
+  if (!SIZING_MODES.has(config.candidateValidation.sizingMode)) {
+    throw new Error(`Invalid candidateValidation.sizingMode: ${config.candidateValidation.sizingMode}`);
+  }
+
   validateNonNegativeAssetAmounts(config.candidateValidation.startAmountByAsset, "candidateValidation.startAmountByAsset");
   validateNonNegativeAssetAmounts(config.candidateValidation.minOrderAmountByAsset, "candidateValidation.minOrderAmountByAsset");
+  if (config.candidateValidation.maxStartAmountByAsset !== undefined) {
+    validateNonNegativeAssetAmounts(config.candidateValidation.maxStartAmountByAsset, "candidateValidation.maxStartAmountByAsset");
+  }
   validateNonNegativeAssetAmounts(
     config.candidateValidation.minResidualAbsoluteByAsset,
     "candidateValidation.minResidualAbsoluteByAsset",
@@ -334,7 +363,7 @@ function loadRuntimeConfig(options = {}) {
     parsed = cloneJson(DEFAULT_RUNTIME_CONFIG);
   }
 
-  return freezeRuntimeConfig(parsed, {
+  return freezeRuntimeConfig(mergeRuntimeConfigDefaults(parsed), {
     allowLiveTrading: options.allowLiveTrading === true,
   });
 }
@@ -346,7 +375,9 @@ module.exports = {
   START_ASSETS,
   EXECUTION_MODES,
   PARTIAL_FILL_POLICIES,
+  SIZING_MODES,
   loadRuntimeConfig,
+  mergeRuntimeConfigDefaults,
   validateRuntimeConfig,
   freezeRuntimeConfig,
 };

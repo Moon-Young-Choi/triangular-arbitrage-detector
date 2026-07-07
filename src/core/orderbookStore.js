@@ -16,6 +16,8 @@ class OrderbookStore {
 
   update(orderbook, nowMs = Date.now()) {
     const nextSequence = this.localSequence + 1;
+    const previousMarket = orderbook && (orderbook.market || orderbook.code);
+    const previous = previousMarket ? this.orderbooks.get(previousMarket) : null;
     const normalized = normalizeStoreOrderbook(orderbook, this.orderbookUnit, nowMs, {
       localSequence: nextSequence,
       storeName: this.name,
@@ -26,6 +28,22 @@ class OrderbookStore {
     }
 
     this.localSequence = nextSequence;
+    const streamType = String(normalized.streamType || "").toUpperCase();
+    const isWsUpdate = streamType !== "REST";
+    const receivedAt = normalized.receivedAt || nowMs;
+    const firstWsReceivedAt = isWsUpdate
+      ? (previous && previous.firstWsReceivedAt || receivedAt)
+      : (previous && previous.firstWsReceivedAt || normalized.firstWsReceivedAt || null);
+    const lastWsReceivedAt = isWsUpdate
+      ? receivedAt
+      : (previous && previous.lastWsReceivedAt || normalized.lastWsReceivedAt || null);
+    const wsMessageCount = (previous && Number(previous.wsMessageCount) || 0) + (isWsUpdate ? 1 : 0);
+
+    normalized.firstWsReceivedAt = firstWsReceivedAt;
+    normalized.lastWsReceivedAt = lastWsReceivedAt;
+    normalized.wsMessageCount = wsMessageCount;
+    normalized.wsConfirmed = Boolean(firstWsReceivedAt);
+    normalized.sourceState = normalized.wsConfirmed ? "ws_confirmed" : "rest_only";
     this.orderbooks.set(normalized.market, normalized);
     this.lastUpdatedAt = new Date(normalized.receivedAt || nowMs).toISOString();
 
@@ -85,6 +103,10 @@ class OrderbookStore {
       orderbookUnit: this.orderbookUnit,
       marketCount: this.orderbooks.size,
       staleCount: freshness.staleCount,
+      restOnlyCount: freshness.restOnlyCount,
+      wsConfirmedCount: freshness.wsConfirmedCount,
+      quietCount: freshness.quietCount,
+      sourceStateCounts: freshness.sourceStateCounts,
       averageLatencyMs: this.averageLatency(nowMs),
       lastUpdatedAt: this.lastUpdatedAt,
       localSequence: this.localSequence,

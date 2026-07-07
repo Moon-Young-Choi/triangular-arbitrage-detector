@@ -97,3 +97,26 @@ test("observation and validation stores retain their configured depth", () => {
   assert.equal(validation.getStatus(7000).oldestAgeMs, 5990);
   assert.equal(summarizeOrderbookFreshness(validation.orderbooks, 7000, 5000).staleCount, 1);
 });
+
+test("orderbook stores distinguish REST-only, WS-confirmed, and quiet markets", () => {
+  const validation = new ValidationOrderbookStore({ staleOrderbookMs: 5000 });
+  const rest = payload(30, { stream_type: "REST", timestamp: 1000 });
+  const ws = payload(30, { stream_type: "SNAPSHOT", timestamp: 2000 });
+
+  validation.update(rest, 1010);
+  let status = validation.getStatus(2000);
+
+  assert.equal(validation.get("KRW-BTC").sourceState, "rest_only");
+  assert.equal(status.restOnlyCount, 1);
+  assert.equal(status.wsConfirmedCount, 0);
+
+  validation.update(ws, 2010);
+  status = validation.getStatus(8000);
+
+  assert.equal(validation.get("KRW-BTC").sourceState, "ws_confirmed");
+  assert.equal(validation.get("KRW-BTC").wsConfirmed, true);
+  assert.equal(status.restOnlyCount, 0);
+  assert.equal(status.wsConfirmedCount, 1);
+  assert.equal(status.quietCount, 1);
+  assert.equal(status.sourceStateCounts.quiet, 1);
+});

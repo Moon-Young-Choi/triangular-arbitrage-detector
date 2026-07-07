@@ -53,6 +53,12 @@ function formatPercent(value, options = {}) {
   return colorBySign(text, numeric, options);
 }
 
+function formatMs(value, digits = 1) {
+  const numeric = numberOrNull(value);
+  if (numeric === null) return "-";
+  return `${numeric.toFixed(digits).replace(/\.?0+$/u, "")}ms`;
+}
+
 function formatAssetAmount(value, asset = "", options = {}) {
   if (numberOrNull(value) === null) return "-";
   const amount = formatNumber(value, asset === "KRW" ? 2 : 8);
@@ -196,6 +202,29 @@ function feeForLeg(leg = {}) {
   return feeRate || "-";
 }
 
+function timingForLeg(leg = {}) {
+  const timing = leg.executionLatency || {};
+  const total = numberOrNull(timing.legTotalMs);
+  const ack = numberOrNull(timing.orderAckMs);
+  const reconcile = numberOrNull(timing.reconciliationMs);
+  const query = numberOrNull(timing.orderQueryMs);
+  const privateWs = numberOrNull(timing.privateWsFillMs);
+  const source = timing.source || leg.source || null;
+
+  if (timing.simulated) {
+    return `sim ${formatMs(total ?? 0)}`;
+  }
+
+  const parts = [];
+  if (total !== null) parts.push(`total ${formatMs(total)}`);
+  if (ack !== null) parts.push(`ack ${formatMs(ack)}`);
+  if (privateWs !== null) parts.push(`ws ${formatMs(privateWs)}`);
+  if (query !== null) parts.push(`query ${formatMs(query)}`);
+  if (reconcile !== null) parts.push(`recon ${formatMs(reconcile)}`);
+  if (source) parts.push(source);
+  return parts.length > 0 ? parts.join(" / ") : "-";
+}
+
 function legRows(legs = [], options = {}) {
   return legs.map((leg, index) => {
     const inputAsset = leg.fromAsset || leg.from || "";
@@ -216,6 +245,7 @@ function legRows(legs = [], options = {}) {
       leg.bestLevelTouchRatio === undefined || leg.bestLevelTouchRatio === null
         ? "-"
         : `${(Number(leg.bestLevelTouchRatio) * 100).toFixed(2)}%`,
+      timingForLeg(leg),
     ];
   });
 }
@@ -252,6 +282,7 @@ function normalizedContract(row = {}) {
     expectedNetProfit: numberOrNull(field(row, "expectedNetProfit")),
     expectedSimulatedGap: numberOrNull(field(row, "expectedSimulatedGap")),
     feeSummary: field(row, "feeSummary"),
+    cycleExecutionLatency: field(row, "cycleExecutionLatency"),
     legs: contractLegs(row),
   };
 }
@@ -284,6 +315,7 @@ function renderContract(row = {}, options = {}) {
     : "-";
   const feeSummary = contract.feeSummary || {};
   const fees = formatFeeSummary(feeSummary);
+  const cycleTiming = contract.cycleExecutionLatency || {};
   const rows = legRows(contract.legs, options);
 
   return [
@@ -298,17 +330,19 @@ function renderContract(row = {}, options = {}) {
       ["Expected profit", formatSignedAssetAmount(contract.expectedNetProfit, contract.startAsset, options)],
       ["Expected gap", formatSignedAssetAmount(contract.expectedSimulatedGap, contract.startAsset, options)],
       ["Fees", fees],
+      ["Cycle time", cycleTiming.simulated ? `sim ${formatMs(cycleTiming.cycleTotalMs)}` : formatMs(cycleTiming.cycleTotalMs)],
       ["Strategy", contract.strategyId],
       ["Cycle", contract.cycleId],
     ]),
     rows.length > 0
-      ? renderTable(["#", "Market", "Route", "Side", "Input", "Avg price", "Output", "Fee", "Slip", "Touch"], rows)
+      ? renderTable(["#", "Market", "Route", "Side", "Input", "Avg price", "Output", "Fee", "Slip", "Touch", "Time"], rows)
       : "No leg detail.",
   ].join("\n");
 }
 
 function isContractEvent(row = {}) {
-  return field(row, "type") === "cycle.done";
+  return field(row, "type") === "cycle.done" ||
+    (field(row, "type") === "cycle.aborted" && field(row, "recoveredToStart") === true);
 }
 
 function renderContracts(rows = [], options = {}) {

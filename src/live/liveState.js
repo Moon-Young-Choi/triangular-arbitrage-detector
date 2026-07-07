@@ -212,6 +212,9 @@ function compactCycleForDelta(row) {
     validationReason: row.validationReason,
     executableStartAmount: row.executableStartAmount,
     maxExecutableStartAmount: row.maxExecutableStartAmount,
+    sizingMode: row.sizingMode,
+    sizingReason: row.sizingReason,
+    sizingLiquidityStartAmount: row.sizingLiquidityStartAmount,
     limitingLeg: row.limitingLeg,
     limitingMarket: row.limitingMarket,
     expectedSlippageBps: row.expectedSlippageBps,
@@ -336,8 +339,18 @@ class LiveTriangleState {
     this.feeRate = parseFeeRate(options.feeRate, 0);
     this.staleOrderbookMs = options.staleOrderbookMs || 3000;
     this.runtimeConfig = freezeRuntimeConfig(options.runtimeConfig || DEFAULT_RUNTIME_CONFIG);
-    this.fetchMarkets = options.fetchMarkets || fetchUpbitMarkets;
-    this.fetchOrderbooks = options.fetchOrderbooks || fetchOrderbooks;
+    this.rateLimitScheduler = options.rateLimitScheduler || null;
+    this.fetchMarkets = options.fetchMarkets ||
+      ((client) => fetchUpbitMarkets(client, {
+        scheduler: this.rateLimitScheduler,
+        priority: "warmup",
+      }));
+    this.fetchOrderbooks = options.fetchOrderbooks ||
+      ((markets, fetchOptions = {}) => fetchOrderbooks(markets, {
+        ...fetchOptions,
+        scheduler: fetchOptions.scheduler || this.rateLimitScheduler,
+        priority: fetchOptions.priority || "warmup",
+      }));
     this.serverStartedAt = new Date().toISOString();
     this.engineState = options.engineState || "STOPPED";
     this.marketRows = [];
@@ -949,6 +962,10 @@ class LiveTriangleState {
       validationAccepted: row.validationStatus === "accepted",
       executableStartAmount: row.executableStartAmount,
       maxExecutableStartAmount: row.maxExecutableStartAmount,
+      sizingMode: row.sizingMode,
+      sizingReason: row.sizingReason,
+      sizingLiquidityStartAmount: row.sizingLiquidityStartAmount,
+      sizingLegs: row.sizingLegs,
       limitingLeg: row.limitingLeg,
       limitingMarket: row.limitingMarket,
       expectedSlippageBps: row.expectedSlippageBps,
@@ -1014,6 +1031,10 @@ class LiveTriangleState {
         latencyMs,
         executableStartAmount: row.executableStartAmount,
         maxExecutableStartAmount: row.maxExecutableStartAmount,
+        sizingMode: row.sizingMode,
+        sizingReason: row.sizingReason,
+        sizingLiquidityStartAmount: row.sizingLiquidityStartAmount,
+        sizingLegs: row.sizingLegs,
         limitingLeg: row.limitingLeg,
         limitingMarket: row.limitingMarket,
         expectedSlippageBps: row.expectedSlippageBps,
@@ -1183,6 +1204,9 @@ class LiveTriangleState {
       observationOrderbooks: calculationOrderbooks,
       config: {
         ...this.runtimeConfig.candidateValidation,
+        sizingMode: this.activeStrategy.defaultConfig &&
+          this.activeStrategy.defaultConfig.sizingMode ||
+          this.runtimeConfig.candidateValidation.sizingMode,
         expectedValidationOrderbookUnit: this.runtimeConfig.validationOrderbookUnit,
         maxValidationLegTimestampSkewMs: marketDataGuards.maxLegTimestampSkewMs,
         maxOldestValidationReceivedAgeMs: marketDataGuards.maxOldestLegAgeMs,
@@ -1229,6 +1253,10 @@ class LiveTriangleState {
       validationReason: depthValidation.validationReason,
       executableStartAmount: depthValidation.executableStartAmount,
       maxExecutableStartAmount: depthValidation.maxExecutableStartAmount,
+      sizingMode: depthValidation.sizingMode,
+      sizingReason: depthValidation.sizingReason,
+      sizingLiquidityStartAmount: depthValidation.sizingLiquidityStartAmount,
+      sizingLegs: depthValidation.sizingLegs,
       limitingLeg: depthValidation.limitingLeg,
       limitingMarket: depthValidation.limitingMarket,
       expectedSlippageBps: depthValidation.expectedSlippageBps,
@@ -1306,7 +1334,12 @@ class LiveTriangleState {
     }
 
     if (options.logDecision !== false) {
-      if (options.logDecision === "bounded") {
+      if (this.engineState === "PREPARING" || this.engineState === "PREPARING_BLOCKED") {
+        this.logDecision(row, {
+          detailed: false,
+          stateChanged,
+        });
+      } else if (options.logDecision === "bounded") {
         this.logDecision(row, {
           detailed: row.strategyAccepted === true,
           stateChanged,

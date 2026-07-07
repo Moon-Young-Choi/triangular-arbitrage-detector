@@ -275,3 +275,43 @@ test("order manager refuses to cancel unidentified open orders without REST call
     event.error.code === "ORDER_CANCEL_IDENTIFIER_REQUIRED"
   )), true);
 });
+
+test("order manager consumes reserved order capacity before REST submit", async () => {
+  const events = [];
+  const reservation = {
+    id: "reservation-1",
+    remaining: 3,
+    commitCalls: 0,
+    commit() {
+      this.commitCalls += 1;
+      this.remaining -= 1;
+    },
+  };
+  const manager = new OrderManager({
+    logStore: memoryLogStore(events),
+    restClient: {
+      async createOrder(order) {
+        return {
+          ...order,
+          uuid: "uuid-capacity",
+          state: "wait",
+        };
+      },
+    },
+  });
+
+  await manager.submitOrder({
+    market: "KRW-BTC",
+    side: "bid",
+    ord_type: "limit",
+    price: "100",
+    volume: "1",
+  }, {
+    planId: "plan-capacity",
+    orderCapacityReservation: reservation,
+  });
+
+  assert.equal(reservation.commitCalls, 1);
+  assert.equal(reservation.remaining, 2);
+  assert.equal(events.some((event) => event.kind === "orders" && event.type === "order.capacity_committed"), true);
+});

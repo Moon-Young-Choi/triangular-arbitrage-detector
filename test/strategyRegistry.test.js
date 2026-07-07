@@ -72,10 +72,12 @@ test("strategy registry exposes baseline and depth-aware strategies", () => {
   const baseline = registry.get("topOfBookBaseline");
 
   assert.deepEqual(strategies.map((strategy) => strategy.id).sort(), [
+    "bestLevelResidualIoc",
     "depthAwareLimitIoc",
     "topOfBookBaseline",
   ]);
   assert.equal(registry.get("depthAwareBestIoc").id, "depthAwareLimitIoc");
+  assert.equal(registry.get("bestLevelResidual").id, "bestLevelResidualIoc");
   assert.equal(baseline.evaluate({
     row: {
       status: "available",
@@ -117,8 +119,12 @@ test("strategies build execution plans through the shared contract", () => {
   const registry = createStrategyRegistry();
   const depthAware = registry.get("depthAwareLimitIoc");
   const baseline = registry.get("topOfBookBaseline");
+  const residual = registry.get("bestLevelResidualIoc");
   const depthPlan = depthAware.buildExecutionPlan(planContext(depthAware));
   const baselinePlan = baseline.buildExecutionPlan(planContext(baseline));
+  const residualPlan = residual.buildExecutionPlan(planContext(residual, {
+    row: { sizingMode: "best-level-residual" },
+  }));
 
   assert.equal(depthPlan.strategyId, "depthAwareLimitIoc");
   assert.equal(depthPlan.strategyVersion, depthAware.version);
@@ -126,6 +132,8 @@ test("strategies build execution plans through the shared contract", () => {
   assert.equal(depthPlan.startAmount, 10000);
   assert.equal(baselinePlan.strategyId, "topOfBookBaseline");
   assert.equal(baselinePlan.strategyVersion, baseline.version);
+  assert.equal(residualPlan.strategyId, "bestLevelResidualIoc");
+  assert.equal(residualPlan.recoverOnRepriceLoss, true);
   assert.equal(depthAware.explain({ reason: "DEPTH_VALIDATED" }), "DEPTH_VALIDATED");
 });
 

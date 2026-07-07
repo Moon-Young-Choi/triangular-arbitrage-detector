@@ -111,6 +111,18 @@ class OrderManager {
       ...order,
       identifier,
     };
+    if (metadata.orderCapacityReservation && typeof metadata.orderCapacityReservation.commit === "function") {
+      metadata.orderCapacityReservation.commit(1);
+      this.append({
+        type: "order.capacity_committed",
+        mode: "REAL",
+        reservationId: metadata.orderCapacityReservation.id,
+        reservationRemaining: metadata.orderCapacityReservation.remaining,
+        order: submittedOrder,
+        ...metadata,
+        orderCapacityReservation: undefined,
+      });
+    }
     const orderSubmitStartPerfNs = perfNowNs();
     this.append({
       type: "order.submitted",

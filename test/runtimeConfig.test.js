@@ -1,7 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const {
   DEFAULT_RUNTIME_CONFIG,
+  loadRuntimeConfig,
   validateRuntimeConfig,
   freezeRuntimeConfig,
 } = require("../src/core/runtimeConfig");
@@ -29,6 +33,21 @@ test("runtime config accepts the default Upbit observe configuration", () => {
   assert.equal(config.executionPolicy.readinessGuards.minimumDryRunCompleteRate, 0.5);
   assert.equal(config.candidateValidation.maxTouchRatioPerBestLevel, 0.3);
   assert.equal(config.candidateValidation.maxObservationValidationGapMs, 500);
+});
+
+test("runtime config loader backfills newly added defaults for older config files", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "q-gagarin-runtime-config-"));
+  const configPath = path.join(dir, "runtime.json");
+  const staleConfig = JSON.parse(JSON.stringify(DEFAULT_RUNTIME_CONFIG));
+  delete staleConfig.executionPolicy.recoverOnRepriceLoss;
+  delete staleConfig.candidateValidation.sizingMode;
+
+  fs.writeFileSync(configPath, `${JSON.stringify(staleConfig, null, 2)}\n`);
+
+  const config = loadRuntimeConfig({ configPath });
+
+  assert.equal(config.executionPolicy.recoverOnRepriceLoss, true);
+  assert.equal(config.candidateValidation.sizingMode, "configured");
 });
 
 test("runtime config gates BEST_IOC behind explicit opt-in", () => {

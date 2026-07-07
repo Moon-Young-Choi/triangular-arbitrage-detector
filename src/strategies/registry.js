@@ -1,5 +1,6 @@
 const topOfBookBaseline = require("./topOfBookBaseline");
 const depthAwareLimitIoc = require("./depthAwareLimitIoc");
+const bestLevelResidualIoc = require("./bestLevelResidualIoc");
 
 class StrategyRegistry {
   constructor(strategies = []) {
@@ -77,6 +78,7 @@ function createStrategyRegistry() {
   return new StrategyRegistry([
     topOfBookBaseline,
     depthAwareLimitIoc,
+    bestLevelResidualIoc,
   ]);
 }
 

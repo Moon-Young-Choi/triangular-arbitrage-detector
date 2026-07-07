@@ -187,9 +187,30 @@ function formatLocalTimestampForFilename(date = new Date()) {
   );
 }
 
+function orderbookWsConfirmed(orderbook) {
+  if (!orderbook) return false;
+  if (orderbook.wsConfirmed === true) return true;
+  if (orderbook.firstWsReceivedAt || orderbook.lastWsReceivedAt) return true;
+
+  const streamType = String(orderbook.streamType || orderbook.stream_type || "").toUpperCase();
+  return streamType !== "" && streamType !== "REST" && streamType !== "UNKNOWN";
+}
+
+function orderbookIsRestOnly(orderbook) {
+  if (!orderbook) return false;
+  if (orderbook.sourceState === "rest_only") return true;
+  if (orderbookWsConfirmed(orderbook)) return false;
+
+  const streamType = String(orderbook.streamType || orderbook.stream_type || "").toUpperCase();
+  return streamType === "REST";
+}
+
 function getCycleFreshness(cycle, orderbookMap, staleOrderbookMs, nowMs = Date.now()) {
   const missingMarkets = [];
   const staleMarkets = [];
+  const restOnlyMarkets = [];
+  const quietMarkets = [];
+  const wsConfirmedMarkets = [];
   const timestamps = [];
   const receivedAts = [];
   const ages = [];
@@ -203,11 +224,19 @@ function getCycleFreshness(cycle, orderbookMap, staleOrderbookMs, nowMs = Date.n
     }
 
     const receivedAt = orderbook.receivedAt || orderbook.timestamp;
+    const ageMs = receivedAt ? Math.max(0, nowMs - receivedAt) : null;
+    const stale = !receivedAt || nowMs - receivedAt > staleOrderbookMs;
+    const wsConfirmed = orderbookWsConfirmed(orderbook);
     timestamps.push(orderbook.timestamp);
     receivedAts.push(receivedAt);
-    ages.push(receivedAt ? Math.max(0, nowMs - receivedAt) : null);
+    ages.push(ageMs);
 
-    if (!receivedAt || nowMs - receivedAt > staleOrderbookMs) {
+    if (orderbookIsRestOnly(orderbook)) {
+      restOnlyMarkets.push(market);
+    } else if (wsConfirmed) {
+      wsConfirmedMarkets.push(market);
+      if (stale) quietMarkets.push(market);
+    } else if (stale) {
       staleMarkets.push(market);
     }
   }
@@ -218,6 +247,9 @@ function getCycleFreshness(cycle, orderbookMap, staleOrderbookMs, nowMs = Date.n
     newestLegAgeMs: finiteAges.length > 0 ? Math.min(...finiteAges) : null,
     oldestLegAgeMs: finiteAges.length > 0 ? Math.max(...finiteAges) : null,
     maxLegAgeMs: finiteAges.length > 0 ? Math.max(...finiteAges) : null,
+    restOnlyMarkets,
+    quietMarkets,
+    wsConfirmedMarkets,
   };
 
   if (missingMarkets.length > 0) {
@@ -227,6 +259,16 @@ function getCycleFreshness(cycle, orderbookMap, staleOrderbookMs, nowMs = Date.n
       unavailableReason: `Missing orderbook for ${missingMarkets.join(", ")}`,
       lastOrderbookTimestamp: timestamps.length > 0 ? Math.max(...timestamps) : null,
       oldestOrderbookReceivedAt: receivedAts.length > 0 ? Math.min(...receivedAts) : null,
+    };
+  }
+
+  if (restOnlyMarkets.length > 0) {
+    return {
+      ...freshnessStats,
+      status: "unavailable",
+      unavailableReason: `REST-only orderbook for ${restOnlyMarkets.join(", ")}`,
+      lastOrderbookTimestamp: Math.max(...timestamps),
+      oldestOrderbookReceivedAt: Math.min(...receivedAts),
     };
   }
 

@@ -241,6 +241,15 @@ function orderbookTimestamp(orderbook) {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
+function orderbookExplicitWsConfirmed(orderbook) {
+  return Boolean(orderbook && (
+    orderbook.wsConfirmed === true ||
+    orderbook.firstWsReceivedAt ||
+    orderbook.lastWsReceivedAt ||
+    orderbook.sourceState === "ws_confirmed"
+  ));
+}
+
 function validationOrderForLeg(step, side, simulated) {
   const price = simulated.averagePrice;
   const volume = side === "bid"
@@ -279,7 +288,8 @@ function simulateCycleWithDepth(cycle, orderbooks, startAmount, feeRate = 0, opt
     const timestamp = orderbookTimestamp(orderbook);
     if (
       options.staleOrderbookMs &&
-      (!timestamp || nowMs - timestamp > options.staleOrderbookMs)
+      (!timestamp || nowMs - timestamp > options.staleOrderbookMs) &&
+      !orderbookExplicitWsConfirmed(orderbook)
     ) {
       return {
         available: false,

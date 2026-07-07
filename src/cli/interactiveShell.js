@@ -1,8 +1,10 @@
 const readline = require("node:readline");
 const { parseSlashCommand } = require("./commandParser");
 const {
+  acceptSlashCommandSuggestion,
   completeSlashCommand,
   renderSlashCommandSuggestions,
+  slashCommandSuggestionState,
 } = require("./completer");
 const { runCliCommand, renderStatus } = require("./commandRegistry");
 
@@ -14,9 +16,21 @@ function supportsCompletionPanel(input, output) {
     process.env.Q_GAGARIN_COMPLETION_PANEL !== "false";
 }
 
-function installCompletionPanel(rl, input, output) {
+function completionColorEnabled(output) {
+  if (process.env.NO_COLOR) return false;
+  if (process.env.FORCE_COLOR && process.env.FORCE_COLOR !== "0") return true;
+  return output && output.isTTY === true;
+}
+
+function installCompletionPanel(rl, input, output, options = {}) {
   let panelActive = false;
   let panelLineCount = 0;
+  let selectedIndex = 0;
+  const completionOptions = {
+    limit: 8,
+    strategyRegistry: options.strategyRegistry,
+  };
+  const originalTtyWrite = typeof rl._ttyWrite === "function" ? rl._ttyWrite : null;
 
   function clearPanelFromCurrentLine() {
     if (!panelActive) return;
@@ -29,8 +43,21 @@ function installCompletionPanel(rl, input, output) {
   function redrawPanel() {
     const line = rl.line || "";
     const cursor = Number.isInteger(rl.cursor) ? rl.cursor : line.length;
+    const state = slashCommandSuggestionState(line, {
+      ...completionOptions,
+      width: output.columns || 80,
+    });
+
+    if (state.entries.length === 0) {
+      selectedIndex = 0;
+    } else if (selectedIndex >= state.entries.length) {
+      selectedIndex = state.entries.length - 1;
+    }
+
     const panel = renderSlashCommandSuggestions(line, {
-      limit: 8,
+      ...completionOptions,
+      color: completionColorEnabled(output),
+      selectedIndex,
       width: output.columns || 80,
     });
     const panelLines = panel ? panel.split("\n").length : 0;
@@ -52,9 +79,64 @@ function installCompletionPanel(rl, input, output) {
     readline.cursorTo(output, rl.getPrompt().length + cursor);
   }
 
+  function replaceInputLine(line) {
+    rl.line = line;
+    rl.cursor = line.length;
+    selectedIndex = 0;
+    redrawPanel();
+  }
+
+  function submitInputLine(line) {
+    clearPanelFromCurrentLine();
+    rl.line = "";
+    rl.cursor = 0;
+    output.write(`${rl.getPrompt()}${line}\n`);
+    rl.emit("line", line);
+  }
+
+  function handlePanelKey(key = {}) {
+    if (!panelActive) return false;
+
+    const state = slashCommandSuggestionState(rl.line || "", completionOptions);
+    if (state.entries.length === 0) return false;
+
+    if (key.name === "up") {
+      selectedIndex = (selectedIndex + state.entries.length - 1) % state.entries.length;
+      redrawPanel();
+      return true;
+    }
+
+    if (key.name === "down") {
+      selectedIndex = (selectedIndex + 1) % state.entries.length;
+      redrawPanel();
+      return true;
+    }
+
+    if (key.name === "return" || key.name === "enter") {
+      const accepted = acceptSlashCommandSuggestion(rl.line || "", selectedIndex, completionOptions);
+      if (!accepted) return false;
+      if (accepted.execute) {
+        submitInputLine(accepted.line);
+      } else {
+        replaceInputLine(accepted.line);
+      }
+      return true;
+    }
+
+    return false;
+  }
+
   function scheduleRedraw(_, key = {}) {
-    if (key.name === "return" || key.name === "enter") return;
+    if (["up", "down", "return", "enter"].includes(key.name)) return;
+    selectedIndex = 0;
     setImmediate(redrawPanel);
+  }
+
+  if (originalTtyWrite) {
+    rl._ttyWrite = function patchedTtyWrite(sequence, key) {
+      if (handlePanelKey(key || {})) return;
+      return originalTtyWrite.call(this, sequence, key);
+    };
   }
 
   readline.emitKeypressEvents(input, rl);
@@ -63,6 +145,9 @@ function installCompletionPanel(rl, input, output) {
   rl.on("line", clearPanelFromCurrentLine);
   rl.on("close", () => {
     input.off("keypress", scheduleRedraw);
+    if (originalTtyWrite && rl._ttyWrite) {
+      rl._ttyWrite = originalTtyWrite;
+    }
     if (panelLineCount > 0) {
       clearPanelFromCurrentLine();
     }
@@ -86,11 +171,15 @@ async function startInteractiveShell(context) {
     input,
     output,
     prompt: "qg> ",
-    completer: completeSlashCommand,
+    completer: (line) => completeSlashCommand(line, {
+      strategyRegistry: context.strategyRegistry,
+    }),
   });
 
   if (supportsCompletionPanel(input, output)) {
-    installCompletionPanel(rl, input, output);
+    installCompletionPanel(rl, input, output, {
+      strategyRegistry: context.strategyRegistry,
+    });
   }
 
   rl.prompt();

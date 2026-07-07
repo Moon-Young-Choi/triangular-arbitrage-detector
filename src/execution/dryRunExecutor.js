@@ -1,5 +1,6 @@
 const { simulateCycleWithDepth } = require("../lib/depthSimulator");
 const { mergeValidationConfig } = require("../live/candidateValidator");
+const { diffNsToMs, perfNowNs } = require("../core/timingTrace");
 const { CapitalAllocator } = require("./capitalAllocator");
 
 function cycleExecutionMeta(cycle = {}) {
@@ -195,6 +196,7 @@ class DryRunExecutor {
       capital: allocation.bucket,
     });
 
+    const cycleStartPerfNs = perfNowNs();
     const simulated = simulateCycleWithDepth(
       plan.cycle,
       plan.validationOrderbooks,
@@ -237,9 +239,18 @@ class DryRunExecutor {
       };
     }
 
+    const simulatedLegs = simulated.legs.map((leg) => ({
+      ...leg,
+      executionLatency: {
+        simulated: true,
+        legTotalMs: 0,
+        source: "dry-run",
+      },
+    }));
+
     this.emit("order.accepted", planMeta);
 
-    for (const leg of simulated.legs) {
+    for (const leg of simulatedLegs) {
       this.emit("order.simulated_fill", {
         ...planMeta,
         legIndex: leg.legIndex,
@@ -267,6 +278,16 @@ class DryRunExecutor {
     }
 
     const pnl = simulated.outputAmount - guarded.startAmount;
+    const cycleExecutionLatency = {
+      simulated: true,
+      cycleTotalMs: diffNsToMs(perfNowNs(), cycleStartPerfNs),
+      legs: simulatedLegs.map((leg) => ({
+        legIndex: leg.legIndex,
+        market: leg.market,
+        simulated: true,
+        legTotalMs: 0,
+      })),
+    };
     const settled = this.capitalAllocator.settle(allocation.allocationId, simulated.outputAmount);
     this.emit("cycle.simulated_done", {
       ...planMeta,
@@ -277,7 +298,8 @@ class DryRunExecutor {
       profitRate: simulated.profitRate,
       simulatedNetProfit: pnl,
       expectedSimulatedGap: Number(plan.expectedNetProfit || 0) - pnl,
-      legResults: simulated.legs,
+      legResults: simulatedLegs,
+      cycleExecutionLatency,
       capitalBefore: guarded.capital,
       capitalAfter: settled.bucket,
       capital: settled.bucket,
@@ -290,7 +312,8 @@ class DryRunExecutor {
       profitRate: simulated.profitRate,
       simulatedNetProfit: pnl,
       expectedSimulatedGap: Number(plan.expectedNetProfit || 0) - pnl,
-      legResults: simulated.legs,
+      legResults: simulatedLegs,
+      cycleExecutionLatency,
       capitalBefore: guarded.capital,
       capitalAfter: settled.bucket,
       capital: settled.bucket,
@@ -305,7 +328,8 @@ class DryRunExecutor {
       startAmount: guarded.startAmount,
       outputAmount: simulated.outputAmount,
       profitRate: simulated.profitRate,
-      legResults: simulated.legs,
+      legResults: simulatedLegs,
+      cycleExecutionLatency,
       capitalBefore: guarded.capital,
       capitalAfter: settled.bucket,
       events: this.events.slice(),

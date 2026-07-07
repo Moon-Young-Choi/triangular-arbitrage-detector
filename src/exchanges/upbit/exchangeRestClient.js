@@ -1,6 +1,7 @@
 const axios = require("axios");
 const crypto = require("node:crypto");
 const { createJwtToken, createQueryString } = require("./auth");
+const { groupForExchangeRequest } = require("./rateLimitScheduler");
 
 const DEFAULT_BASE_URL = "https://api.upbit.com/v1";
 
@@ -127,6 +128,7 @@ class UpbitExchangeRestClient {
     this.chanceCache = new Map();
     this.logStore = options.logStore || null;
     this.mode = options.mode || (this.liveTradingEnabled ? "REAL" : "OBSERVE");
+    this.scheduler = options.scheduler || null;
   }
 
   assertCredentials() {
@@ -192,7 +194,7 @@ class UpbitExchangeRestClient {
     });
 
     try {
-      const response = await this.client.request({
+      const execute = () => this.client.request({
         method,
         url: pathname,
         params,
@@ -204,6 +206,14 @@ class UpbitExchangeRestClient {
         },
         paramsSerializer: (value) => createQueryString(value),
       });
+      const group = options.rateLimitGroup || groupForExchangeRequest(method, pathname);
+      const priority = options.priority || "normal";
+      const response = this.scheduler
+        ? await this.scheduler.scheduleRest(group, priority, `${method} ${pathname}`, execute, {
+            requestId,
+            traceId: options.traceId || requestId,
+          })
+        : await execute();
       const completedAtMs = Date.now();
 
       this.appendRestAudit("exchange.rest.response", {
@@ -236,7 +246,10 @@ class UpbitExchangeRestClient {
   }
 
   async getAccounts() {
-    return this.request("GET", "/accounts");
+    return this.request("GET", "/accounts", {
+      priority: "normal",
+      rateLimitGroup: "exchange.default",
+    });
   }
 
   async getOrderChance(market) {
@@ -249,6 +262,8 @@ class UpbitExchangeRestClient {
 
     const value = normalizeOrderChance(await this.request("GET", "/orders/chance", {
       params: { market },
+      priority: "normal",
+      rateLimitGroup: "exchange.default",
     }));
     this.chanceCache.set(market, { cachedAt: now, value });
     return value;
@@ -259,7 +274,11 @@ class UpbitExchangeRestClient {
       this.refuseTradingMutation("createOrder", "POST", "/orders", order, "body");
     }
 
-    return this.request("POST", "/orders", { body: order });
+    return this.request("POST", "/orders", {
+      body: order,
+      priority: "trading",
+      rateLimitGroup: "order",
+    });
   }
 
   async cancelOrder(params) {
@@ -267,11 +286,19 @@ class UpbitExchangeRestClient {
       this.refuseTradingMutation("cancelOrder", "DELETE", "/order", params, "params");
     }
 
-    return this.request("DELETE", "/order", { params });
+    return this.request("DELETE", "/order", {
+      params,
+      priority: "critical",
+      rateLimitGroup: "exchange.default",
+    });
   }
 
   async getOrder(params) {
-    return this.request("GET", "/order", { params });
+    return this.request("GET", "/order", {
+      params,
+      priority: "critical",
+      rateLimitGroup: "exchange.default",
+    });
   }
 
   async checkPermissions(options = {}) {

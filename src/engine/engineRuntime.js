@@ -10,6 +10,7 @@ const { CommandStatusStore } = require("../core/commandStatusStore");
 const { RunStateMachine, STATES, normalizeCommand } = require("../core/runStateMachine");
 const { UpbitPrivateWsClient } = require("../exchanges/upbit/privateWsClient");
 const { UpbitExchangeRestClient } = require("../exchanges/upbit/exchangeRestClient");
+const { UpbitRateLimitScheduler } = require("../exchanges/upbit/rateLimitScheduler");
 const {
   hasCompleteFeePolicy,
   isFeePolicyExpired,
@@ -137,6 +138,9 @@ class EngineRuntime {
       configPath: options.runtimeConfigPath,
       allowLiveTrading: process.env.Q_GAGARIN_ALLOW_LIVE_TRADING === "true",
     });
+    this.rateLimitScheduler = options.rateLimitScheduler || new UpbitRateLimitScheduler({
+      orderReservationTtlMs: Number.parseInt(process.env.UPBIT_ORDER_RESERVATION_TTL_MS || "3000", 10),
+    });
     this.restClient = options.restClient || (
       this.runtimeConfig.liveTradingEnabled || (process.env.UPBIT_ACCESS_KEY && process.env.UPBIT_SECRET_KEY)
         ? new UpbitExchangeRestClient({
@@ -144,6 +148,7 @@ class EngineRuntime {
             chanceTtlMs: this.runtimeConfig.executionPolicy.executionGuards.orderChanceTtlMs,
             logStore: this.logStore,
             mode: String(this.runtimeConfig.runMode || "").startsWith("REAL") ? "REAL" : this.runtimeConfig.runMode,
+            scheduler: this.rateLimitScheduler,
           })
         : null
     );
@@ -152,6 +157,7 @@ class EngineRuntime {
       staleOrderbookMs: options.staleOrderbookMs || Number.parseInt(process.env.STALE_ORDERBOOK_MS || "3000", 10),
       runtimeConfig: this.runtimeConfig,
       logStore: this.logStore,
+      rateLimitScheduler: this.rateLimitScheduler,
     });
     this.machine = options.runStateMachine || new RunStateMachine({
       log: (event) => {
@@ -229,6 +235,11 @@ class EngineRuntime {
     this.fallbackTimer = null;
     this.fallbackPollInFlight = false;
     this.validationStartTimer = null;
+    this.preparationPromise = null;
+    this.preparationTimeoutMs = Number.parseInt(process.env.Q_GAGARIN_PREPARATION_TIMEOUT_MS || "120000", 10);
+    this.preparationMinCoverageRatio = Number(process.env.Q_GAGARIN_PREPARATION_MIN_COVERAGE_RATIO || "0.95");
+    this.preparationMaxStaleRatio = Number(process.env.Q_GAGARIN_PREPARATION_MAX_STALE_RATIO || "0.10");
+    this.preparation = this.initialPreparationStatus();
     this.processedCommandKeys = new Set();
     this.startedAtEpochMs = options.startedAtEpochMs || Date.now();
     this.lastAgingSweepAt = 0;
@@ -245,21 +256,52 @@ class EngineRuntime {
     this.state.setExecutionHandler((plan, metadata) => this.handleExecutionCandidate(plan, metadata));
   }
 
+  initialPreparationStatus() {
+    return {
+      phase: "idle",
+      startedAt: null,
+      completedAt: null,
+      blockedAt: null,
+      progress: {
+        requiredMarketCount: 0,
+        restOrderbookFetched: 0,
+        restOrderbookRequested: 0,
+        restOrderbookPercent: 0,
+        observationCoverageRatio: 0,
+        validationCoverageRatio: 0,
+        observationStaleRatio: 1,
+        validationStaleRatio: 1,
+        observationRestOnlyCount: 0,
+        validationRestOnlyCount: 0,
+        observationWsConfirmedCount: 0,
+        validationWsConfirmedCount: 0,
+        observationQuietCount: 0,
+        validationQuietCount: 0,
+        wsOpenConnections: 0,
+        wsConnectionCount: 0,
+      },
+      blockers: [],
+      error: null,
+    };
+  }
+
+  updatePreparation(patch = {}) {
+    this.preparation = {
+      ...this.preparation,
+      ...patch,
+      progress: {
+        ...(this.preparation && this.preparation.progress || {}),
+        ...(patch.progress || {}),
+      },
+      blockers: patch.blockers || this.preparation.blockers || [],
+    };
+    return this.preparation;
+  }
+
   async initialize() {
     await this.logStore.ensureFiles();
     await this.commandInbox.ensureDirs();
     await this.seedProcessedCommands();
-
-    if (!this.started) {
-      await this.state.initialize();
-      await this.state.loadInitialOrderbooks({
-        batchSize: this.orderbookBatchSize,
-        delayMs: this.orderbookDelayMs,
-        markDirty: false,
-      });
-      this.createFeedClients();
-      this.started = true;
-    }
 
     await this.writeSnapshot();
   }
@@ -268,7 +310,9 @@ class EngineRuntime {
     this.createPublicFeedClients();
 
     if (this.runtimeConfig.liveTradingEnabled || (process.env.UPBIT_ACCESS_KEY && process.env.UPBIT_SECRET_KEY)) {
-      this.privateWsClient = this.privateWsClient || new UpbitPrivateWsClient();
+      this.privateWsClient = this.privateWsClient || new UpbitPrivateWsClient({
+        scheduler: this.rateLimitScheduler,
+      });
       this.privateWsClient.on("myOrder", (event) => {
         this.fillTracker.handleMyOrder(event);
       });
@@ -297,11 +341,15 @@ class EngineRuntime {
       chunkSize: this.wsMarketsPerConnection,
       connectionDelayMs: this.wsConnectionDelayMs,
       orderbookUnit: this.runtimeConfig.observationOrderbookUnit,
+      scheduler: this.rateLimitScheduler,
+      feedName: "observation",
     });
     this.validationClient = this.validationClient || this.orderbookClientFactory(this.state.requiredMarkets || [], {
       chunkSize: this.wsMarketsPerConnection,
       connectionDelayMs: this.wsConnectionDelayMs,
       orderbookUnit: this.runtimeConfig.validationOrderbookUnit,
+      scheduler: this.rateLimitScheduler,
+      feedName: "validation",
     });
 
     this.observationClient.on("orderbook", (orderbook) => {
@@ -367,6 +415,9 @@ class EngineRuntime {
       this.state.stopScheduler();
     }
     this.stopFeeds();
+    if (this.rateLimitScheduler && typeof this.rateLimitScheduler.stop === "function") {
+      this.rateLimitScheduler.stop();
+    }
     await this.writeSnapshot();
   }
 
@@ -414,6 +465,357 @@ class EngineRuntime {
     if (this.validationClient) this.validationClient.stop();
   }
 
+  preparationGateStatus(nowMs = Date.now()) {
+    const requiredMarketCount = Array.isArray(this.state.requiredMarkets) ? this.state.requiredMarkets.length : 0;
+    const stores = this.state.getOrderbookStoreStatus(nowMs);
+    const observation = stores.observation || {};
+    const validation = stores.validation || {};
+    const observationStatus = this.state.wsStatus || {};
+    const validationStatus = this.state.validationWsStatus || {};
+    const observationCoverageRatio = requiredMarketCount > 0
+      ? Math.min(1, Number(observation.marketCount || 0) / requiredMarketCount)
+      : 0;
+    const validationCoverageRatio = requiredMarketCount > 0
+      ? Math.min(1, Number(validation.marketCount || 0) / requiredMarketCount)
+      : 0;
+    const observationStaleRatio = Number(observation.marketCount || 0) > 0
+      ? Number(observation.staleCount || 0) / Number(observation.marketCount || 1)
+      : 1;
+    const validationStaleRatio = Number(validation.marketCount || 0) > 0
+      ? Number(validation.staleCount || 0) / Number(validation.marketCount || 1)
+      : 1;
+    const observationRestOnlyCount = Number(observation.restOnlyCount || 0);
+    const validationRestOnlyCount = Number(validation.restOnlyCount || 0);
+    const observationWsConfirmedCount = Number(observation.wsConfirmedCount || 0);
+    const validationWsConfirmedCount = Number(validation.wsConfirmedCount || 0);
+    const observationQuietCount = Number(observation.quietCount || 0);
+    const validationQuietCount = Number(validation.quietCount || 0);
+    const wsConnectionCount = Number(observationStatus.connectionCount || 0) + Number(validationStatus.connectionCount || 0);
+    const wsOpenConnections = Number(observationStatus.openConnectionCount || 0) + Number(validationStatus.openConnectionCount || 0);
+    const observationWsConfirmedRatio = requiredMarketCount > 0
+      ? Math.min(1, observationWsConfirmedCount / requiredMarketCount)
+      : 0;
+    const validationWsConfirmedRatio = requiredMarketCount > 0
+      ? Math.min(1, validationWsConfirmedCount / requiredMarketCount)
+      : 0;
+    const observationWsReady = observationWsConfirmedRatio >= this.preparationMinCoverageRatio;
+    const validationWsReady = validationWsConfirmedRatio >= this.preparationMinCoverageRatio;
+    const missingMessageConnections = [
+      ...((observationStatus.connections || []).map((connection) => ["observation", connection])),
+      ...((validationStatus.connections || []).map((connection) => ["validation", connection])),
+    ].filter(([, connection]) => connection.status === "open" && !connection.lastMessageAt);
+    const blockers = [];
+
+    if (requiredMarketCount === 0) blockers.push("NO_REQUIRED_MARKETS");
+    if (
+      observationCoverageRatio < this.preparationMinCoverageRatio ||
+      validationCoverageRatio < this.preparationMinCoverageRatio
+    ) {
+      blockers.push("REST_WARMUP_INCOMPLETE");
+    }
+    if (wsConnectionCount === 0 || wsOpenConnections < wsConnectionCount) blockers.push("WS_CONNECTION_PENDING");
+    if (!observationWsReady || !validationWsReady) blockers.push("WS_CONFIRMATION_INCOMPLETE");
+    if (missingMessageConnections.length > 0 && (!observationWsReady || !validationWsReady)) {
+      blockers.push("WS_CONNECTION_NO_MESSAGES");
+    }
+
+    return {
+      ready: blockers.length === 0,
+      blockers,
+      progress: {
+        requiredMarketCount,
+        observationCoverageRatio,
+        validationCoverageRatio,
+        observationStaleRatio,
+        validationStaleRatio,
+        observationStaleCount: observation.staleCount || 0,
+        validationStaleCount: validation.staleCount || 0,
+        observationRestOnlyCount,
+        validationRestOnlyCount,
+        observationWsConfirmedCount,
+        validationWsConfirmedCount,
+        observationWsConfirmedRatio,
+        validationWsConfirmedRatio,
+        observationQuietCount,
+        validationQuietCount,
+        observationMarketCount: observation.marketCount || 0,
+        validationMarketCount: validation.marketCount || 0,
+        wsOpenConnections,
+        wsConnectionCount,
+        missingMessageConnectionCount: missingMessageConnections.length,
+      },
+    };
+  }
+
+  async waitForPreparationGate() {
+    const startedAtMs = Date.now();
+    let lastSnapshotAt = 0;
+
+    while (this.machine.state === STATES.PREPARING) {
+      const nowMs = Date.now();
+      const gate = this.preparationGateStatus(nowMs);
+      this.updatePreparation({
+        phase: "freshness-gate",
+        progress: gate.progress,
+        blockers: gate.blockers,
+      });
+
+      if (gate.ready) return gate;
+      if (nowMs - startedAtMs >= this.preparationTimeoutMs) {
+        const error = new Error(`PREPARATION_TIMEOUT: ${gate.blockers.join(",") || "UNKNOWN"}`);
+        error.blockers = gate.blockers;
+        error.progress = gate.progress;
+        throw error;
+      }
+
+      if (nowMs - lastSnapshotAt >= 1000) {
+        lastSnapshotAt = nowMs;
+        await this.writeSnapshot().catch(() => {});
+      }
+      await new Promise((resolve) => {
+        setTimeout(resolve, 500);
+      });
+    }
+
+    return {
+      ready: false,
+      blockers: ["PREPARATION_CANCELLED"],
+      progress: this.preparation.progress,
+    };
+  }
+
+  startPreparation(metadata = {}) {
+    if (this.preparationPromise) return this.preparationPromise;
+    this.preparationPromise = this.runPreparation(metadata)
+      .finally(() => {
+        this.preparationPromise = null;
+      });
+    return this.preparationPromise;
+  }
+
+  async runPreparation(metadata = {}) {
+    const startedAt = new Date().toISOString();
+    this.updatePreparation({
+      phase: "market-discovery",
+      startedAt,
+      completedAt: null,
+      blockedAt: null,
+      error: null,
+      blockers: [],
+    });
+    await this.writeSnapshot().catch(() => {});
+
+    try {
+      if (typeof this.state.initialize !== "function" || typeof this.state.loadInitialOrderbooks !== "function") {
+        this.updatePreparation({
+          phase: "injected-state-ready",
+          progress: {
+            requiredMarketCount: Array.isArray(this.state.requiredMarkets) ? this.state.requiredMarkets.length : 0,
+          },
+          blockers: [],
+        });
+        this.createFeedClients();
+        this.started = true;
+        this.startFeeds();
+
+        if (String(this.runtimeConfig.runMode || "").startsWith("REAL_")) {
+          const readiness = await this.checkReadiness();
+          if (!readiness.passed) {
+            const error = new Error(`${this.runtimeConfig.runMode} readiness checklist failed`);
+            error.readiness = readiness;
+            error.blockers = readiness.items.filter((entry) => !entry.passed).map((entry) => entry.id);
+            throw error;
+          }
+        }
+
+        const nextState = this.machine.markReady();
+        this.state.engineState = nextState;
+        this.updatePreparation({
+          phase: "ready",
+          completedAt: new Date().toISOString(),
+          blockers: [],
+        });
+        await this.logStore.append("events", {
+          type: "engine.state_changed",
+          mode: executionLogMode(this.runtimeConfig.runMode),
+          engineState: nextState,
+          command: "Start",
+          previousState: STATES.PREPARING,
+          nextState,
+          runMode: this.runtimeConfig.runMode,
+          ...metadata,
+        });
+        await this.writeSnapshot();
+        await this.writeDelta({ forceAgingSweep: true });
+        return {
+          ready: true,
+          blockers: [],
+          progress: this.preparation.progress,
+        };
+      }
+
+      const previousRequiredMarkets = this.requiredMarketsKey();
+      const discovery = await this.state.initialize();
+      if (!discovery.ok) {
+        const message = discovery.error && discovery.error.message || "Market discovery failed";
+        throw new Error(message);
+      }
+
+      const requiredMarketCount = Array.isArray(this.state.requiredMarkets) ? this.state.requiredMarkets.length : 0;
+      this.updatePreparation({
+        phase: "rest-orderbook-warmup",
+        progress: {
+          requiredMarketCount,
+          restOrderbookRequested: requiredMarketCount,
+          restOrderbookFetched: 0,
+          restOrderbookPercent: requiredMarketCount === 0 ? 100 : 0,
+        },
+      });
+      await this.writeSnapshot().catch(() => {});
+
+      const orderbookResult = await this.state.loadInitialOrderbooks({
+        batchSize: this.orderbookBatchSize,
+        delayMs: this.orderbookDelayMs,
+        markDirty: false,
+        priority: "warmup",
+        onProgress: (progress) => {
+          const requested = progress.requestedMarketCount || requiredMarketCount;
+          const fetched = progress.fetchedMarketCount || 0;
+          this.updatePreparation({
+            phase: "rest-orderbook-warmup",
+            progress: {
+              requiredMarketCount,
+              restOrderbookRequested: requested,
+              restOrderbookFetched: fetched,
+              restOrderbookPercent: requested > 0 ? (fetched / requested) * 100 : 100,
+            },
+          });
+        },
+      });
+      this.updatePreparation({
+        phase: "rest-orderbook-warmup",
+        progress: {
+          requiredMarketCount,
+          restOrderbookRequested: orderbookResult.requestedMarketCount || requiredMarketCount,
+          restOrderbookFetched: orderbookResult.fetchedMarketCount || 0,
+          restOrderbookPercent: orderbookResult.requestedMarketCount > 0
+            ? (orderbookResult.fetchedMarketCount / orderbookResult.requestedMarketCount) * 100
+            : 100,
+        },
+        blockers: orderbookResult.errors && orderbookResult.errors.length > 0 ? ["REST_ORDERBOOK_ERRORS"] : [],
+      });
+
+      const nextRequiredMarkets = this.requiredMarketsKey();
+      if (this.started && previousRequiredMarkets !== nextRequiredMarkets) {
+        this.stopPublicFeeds();
+        this.observationClient = null;
+        this.validationClient = null;
+      }
+
+      this.updatePreparation({ phase: "websocket-connect" });
+      this.createFeedClients();
+      this.started = true;
+      this.startFeeds();
+      await this.writeSnapshot().catch(() => {});
+
+      const gate = await this.waitForPreparationGate();
+      if (!gate.ready || this.machine.state !== STATES.PREPARING) {
+        return gate;
+      }
+
+      if (String(this.runtimeConfig.runMode || "").startsWith("REAL_")) {
+        this.updatePreparation({ phase: "real-readiness" });
+        await this.writeSnapshot().catch(() => {});
+        const readiness = await this.checkReadiness();
+        if (!readiness.passed) {
+          const error = new Error(`${this.runtimeConfig.runMode} readiness checklist failed`);
+          error.readiness = readiness;
+          error.blockers = readiness.items.filter((entry) => !entry.passed).map((entry) => entry.id);
+          throw error;
+        }
+      }
+
+      const nextState = this.machine.markReady();
+      this.state.engineState = nextState;
+      this.updatePreparation({
+        phase: "ready",
+        completedAt: new Date().toISOString(),
+        blockers: [],
+        progress: gate.progress,
+      });
+      await this.logStore.append("events", {
+        type: "engine.state_changed",
+        mode: executionLogMode(this.runtimeConfig.runMode),
+        engineState: nextState,
+        command: "Start",
+        previousState: STATES.PREPARING,
+        nextState,
+        runMode: this.runtimeConfig.runMode,
+        ...metadata,
+      });
+      await this.logStore.append("events", {
+        type: "engine.preparation_complete",
+        mode: executionLogMode(this.runtimeConfig.runMode),
+        engineState: nextState,
+        runMode: this.runtimeConfig.runMode,
+        ...metadata,
+      });
+      await this.writeSnapshot();
+      await this.writeDelta({ forceAgingSweep: true });
+      return gate;
+    } catch (error) {
+      if (this.machine.state === STATES.PREPARING) {
+        this.machine.blockPreparation(error.message);
+        this.state.engineState = this.machine.state;
+      }
+      this.stopFeeds();
+      this.updatePreparation({
+        phase: "blocked",
+        blockedAt: new Date().toISOString(),
+        error: error.message,
+        blockers: error.blockers || ["PREPARATION_FAILED"],
+        progress: error.progress || this.preparation.progress,
+      });
+      if (error.readiness) {
+        await this.logStore.append("events", {
+          type: "readiness.blocked",
+          command: "Start",
+          readiness: error.readiness,
+          engineState: this.machine.state,
+          runMode: this.runtimeConfig.runMode,
+          blockers: this.preparation.blockers,
+          ...metadata,
+        });
+      }
+      await this.logStore.append("errors", {
+        type: "engine.preparation_failed",
+        mode: executionLogMode(this.runtimeConfig.runMode),
+        engineState: this.machine.state,
+        message: error.message,
+        blockers: this.preparation.blockers,
+        ...metadata,
+      });
+      if (metadata.commandId) {
+        await this.commandStatusStore.write(metadata.commandId, {
+          status: "rejected",
+          command: "Start",
+          runMode: this.runtimeConfig.runMode,
+          source: metadata.source || "cli",
+          message: error.message,
+          ...(error.readiness ? { readiness: error.readiness } : {}),
+          failedItems: this.preparation.blockers,
+        }).catch(() => {});
+      }
+      await this.writeSnapshot().catch(() => {});
+      await this.writeDelta({ forceAgingSweep: true }).catch(() => {});
+      return {
+        ready: false,
+        blockers: this.preparation.blockers,
+        error,
+      };
+    }
+  }
+
   setRunMode(runMode) {
     const requestedRunMode = String(runMode || "").trim().toUpperCase();
 
@@ -443,26 +845,6 @@ class EngineRuntime {
       configChanged = true;
     }
 
-    if (command === "Start" && String(this.runtimeConfig.runMode || "").startsWith("REAL_")) {
-      const blockedRunMode = this.runtimeConfig.runMode;
-      const readiness = await this.checkReadiness();
-      if (!readiness.passed) {
-        if (configChanged) {
-          this.runtimeConfig = previousConfig;
-          this.state.setRuntimeConfig(previousConfig);
-        }
-        await this.logStore.append("events", {
-          type: "readiness.blocked",
-          command,
-          readiness,
-          ...metadata,
-        });
-        const error = new Error(`${blockedRunMode} readiness checklist failed`);
-        error.readiness = readiness;
-        throw error;
-      }
-    }
-
     let nextState;
     try {
       nextState = this.machine.apply(command);
@@ -474,9 +856,9 @@ class EngineRuntime {
       throw error;
     }
 
-    if (command === "Start" && nextState === STATES.RUNNING && previousState === STATES.STOPPED) {
-      this.startFeeds();
-    }
+    const shouldStartPreparation = command === "Start" &&
+      nextState === STATES.PREPARING &&
+      previousState === STATES.STOPPED;
 
     if (command === "Stop" && nextState === STATES.STOPPED) {
       await this.handleStopOrderPolicy(this.runtimeConfig.executionPolicy.stopPolicy, {
@@ -515,6 +897,13 @@ class EngineRuntime {
     }
     await this.writeSnapshot();
     await this.writeDelta({ forceAgingSweep: true });
+    if (shouldStartPreparation) {
+      this.startPreparation({
+        command,
+        source: metadata.source || "cli",
+        commandId: metadata.commandId,
+      }).catch(() => {});
+    }
     return nextState;
   }
 
@@ -915,7 +1304,12 @@ class EngineRuntime {
 
   validationDepthFresh() {
     const status = this.state.getOrderbookStoreStatus();
-    return status.validation && status.validation.staleCount === 0;
+    const validation = status.validation || null;
+    if (!validation) return false;
+    if (Object.hasOwn(validation, "wsConfirmedCount")) {
+      return Number(validation.wsConfirmedCount || 0) > 0;
+    }
+    return validation.staleCount === 0;
   }
 
   currentGuardContext() {
@@ -1025,10 +1419,48 @@ class EngineRuntime {
       return null;
     }
 
+    let orderCapacityReservation = null;
+    try {
+      orderCapacityReservation = this.rateLimitScheduler.reserveOrderCapacity({
+        count: 3,
+        traceId: plan.planId,
+        cycleId: plan.cycleId || (plan.cycle && plan.cycle.cycleId),
+        ttlMs: Number.parseInt(process.env.UPBIT_ORDER_RESERVATION_TTL_MS || "3000", 10),
+      });
+      await this.logStore.append("orders", {
+        type: "order.capacity_reserved",
+        mode: "REAL",
+        planId: plan.planId,
+        cycleId: plan.cycleId || (plan.cycle && plan.cycle.cycleId),
+        startAsset: plan.startAsset || (plan.cycle && plan.cycle.startAsset),
+        strategyId: plan.strategyId,
+        reservation: orderCapacityReservation.snapshot(),
+      });
+    } catch (error) {
+      await this.logStore.append("orders", {
+        type: "order.rejected",
+        mode: "REAL",
+        planId: plan.planId,
+        cycleId: plan.cycleId || (plan.cycle && plan.cycle.cycleId),
+        startAsset: plan.startAsset || (plan.cycle && plan.cycle.startAsset),
+        strategyId: plan.strategyId,
+        rejectionReason: "ORDER_CAPACITY_UNAVAILABLE",
+        requiredOrderSlots: error.required || 3,
+        availableOrderSlots: error.available || 0,
+      });
+      return {
+        ok: false,
+        reason: "ORDER_CAPACITY_UNAVAILABLE",
+        requiredOrderSlots: error.required || 3,
+        availableOrderSlots: error.available || 0,
+      };
+    }
+
     this.activeRealExecutionCount += 1;
     try {
       const result = await this.realExecutor.execute(plan, {
         ...this.currentGuardContext(),
+        orderCapacityReservation,
         getGuardContext: () => this.currentGuardContext(),
         getValidationOrderbooks: () => this.state.getValidationOrderbooks(),
         getMarketPolicy: (market) => this.marketPolicyByMarket.get(market) || null,
@@ -1117,6 +1549,9 @@ class EngineRuntime {
         emergencyStop: failed.emergencyStop,
       };
     } finally {
+      if (orderCapacityReservation && typeof orderCapacityReservation.release === "function") {
+        orderCapacityReservation.release();
+      }
       this.activeRealExecutionCount = Math.max(0, this.activeRealExecutionCount - 1);
     }
   }
@@ -1239,12 +1674,17 @@ class EngineRuntime {
       engine: this.machine.snapshot(),
       engineProcess: {
         pid: process.pid,
+        startedAt: new Date(this.startedAtEpochMs).toISOString(),
+        startedAtEpochMs: this.startedAtEpochMs,
         runtimeDir: this.runtimeDir,
         snapshotPath: this.snapshotPath,
         deltaPath: this.deltaPath,
       },
       privateWsStatus: this.privateWsStatus,
       readiness: this.readiness,
+      preparation: this.preparation,
+      rateLimit: this.rateLimitScheduler.snapshot(),
+      orderCapacity: this.rateLimitScheduler.orderCapacitySnapshot(),
       privateCacheStatus: this.buildPrivateCacheStatus({ includePolicyMaps: true }),
       guardStatus: {
         consecutiveFailures: this.riskGuard.consecutiveFailures,
@@ -1288,6 +1728,9 @@ class EngineRuntime {
       orderbookStores: this.state.getOrderbookStoreStatus(nowMs),
       privateWsStatus: this.privateWsStatus,
       readiness: this.readiness,
+      preparation: this.preparation,
+      rateLimit: this.rateLimitScheduler.snapshot(nowMs),
+      orderCapacity: this.rateLimitScheduler.orderCapacitySnapshot(nowMs),
       privateCacheStatus: this.buildPrivateCacheStatus(),
       guardStatus: {
         consecutiveFailures: this.riskGuard.consecutiveFailures,

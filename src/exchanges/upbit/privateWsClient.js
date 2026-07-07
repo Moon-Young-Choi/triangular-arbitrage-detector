@@ -49,6 +49,7 @@ class UpbitPrivateWsClient extends EventEmitter {
     this.pingIntervalMs = options.pingIntervalMs || 20000;
     this.reconnectMinMs = options.reconnectMinMs || 1000;
     this.reconnectMaxMs = options.reconnectMaxMs || 30000;
+    this.scheduler = options.scheduler || null;
     this.ws = null;
     this.pingTimer = null;
     this.reconnectTimer = null;
@@ -88,28 +89,56 @@ class UpbitPrivateWsClient extends EventEmitter {
   }
 
   open() {
-    const headers = {
-      Authorization: this.authHeader(),
-    };
-    const ws = new this.WebSocket(this.endpoint, { headers });
-    this.ws = ws;
-    this.emit("status", this.getStatus("connecting"));
+    const open = () => {
+      if (this.stopped) return null;
+      const headers = {
+        Authorization: this.authHeader(),
+      };
+      const ws = new this.WebSocket(this.endpoint, { headers });
+      this.ws = ws;
+      this.emit("status", this.getStatus("connecting"));
 
-    ws.on("open", () => {
+      ws.on("open", () => {
       this.reconnectAttempt = 0;
-      ws.send(JSON.stringify([
+      const payload = JSON.stringify([
         { ticket: `q-gagarin-private-${crypto.randomUUID()}` },
         { type: "myOrder", codes: this.codes },
-      ]));
+      ]);
+      const sendSubscription = () => new Promise((resolve, reject) => {
+        ws.send(payload, (error) => {
+          if (error) reject(error);
+          else resolve({ ok: true });
+        });
+      });
+      if (this.scheduler && typeof this.scheduler.scheduleWebSocketMessage === "function") {
+        this.scheduler.scheduleWebSocketMessage(
+          "private:myOrder",
+          "critical",
+          "private-myorder-subscribe",
+          sendSubscription,
+        ).catch((error) => {
+          this.emit("error", {
+            type: "websocket-message",
+            message: error.message,
+          });
+        });
+      } else {
+        sendSubscription().catch((error) => {
+          this.emit("error", {
+            type: "websocket-message",
+            message: error.message,
+          });
+        });
+      }
       this.pingTimer = setInterval(() => {
         if (ws.readyState === this.WebSocket.OPEN) {
           ws.ping();
         }
       }, this.pingIntervalMs);
       this.emit("status", this.getStatus("open"));
-    });
+      });
 
-    ws.on("message", (data) => {
+      ws.on("message", (data) => {
       this.lastMessageAt = Date.now();
 
       try {
@@ -121,16 +150,16 @@ class UpbitPrivateWsClient extends EventEmitter {
           message: error.message,
         });
       }
-    });
+      });
 
-    ws.on("error", (error) => {
+      ws.on("error", (error) => {
       this.emit("error", {
         type: "websocket",
         message: error.message,
       });
-    });
+      });
 
-    ws.on("close", (code, reason) => {
+      ws.on("close", (code, reason) => {
       clearInterval(this.pingTimer);
       this.emit("status", this.getStatus("closed", { code, reason: reason.toString("utf8") }));
 
@@ -141,7 +170,27 @@ class UpbitPrivateWsClient extends EventEmitter {
           if (!this.stopped) this.open();
         }, delayMs);
       }
-    });
+      });
+
+      return ws;
+    };
+
+    if (this.scheduler && typeof this.scheduler.scheduleWebSocketConnect === "function") {
+      this.emit("status", this.getStatus("queued"));
+      this.scheduler.scheduleWebSocketConnect(
+        "critical",
+        "private-myorder-connect",
+        open,
+      ).catch((error) => {
+        this.emit("status", this.getStatus("failed"));
+        this.emit("error", {
+          type: "websocket-connect",
+          message: error.message,
+        });
+      });
+    } else {
+      open();
+    }
   }
 
   getStatus(status, metadata = {}) {

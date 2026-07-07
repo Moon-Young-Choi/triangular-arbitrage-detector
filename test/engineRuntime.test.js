@@ -91,6 +91,138 @@ function wait(ms = 0) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForState(runtime, expectedState, timeoutMs = 500) {
+  const expected = Array.isArray(expectedState) ? expectedState : [expectedState];
+  const startedAt = Date.now();
+  while (!expected.includes(runtime.machine.state) && Date.now() - startedAt < timeoutMs) {
+    await wait(5);
+  }
+  if (expected.includes(runtime.machine.state) && runtime.preparationPromise) {
+    await runtime.preparationPromise.catch(() => {});
+  }
+  return runtime.machine.state;
+}
+
+test("engine preparation gate allows quiet WS-confirmed markets", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-prep-quiet-"));
+  const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
+  const state = fakeState();
+
+  state.requiredMarkets = ["KRW-BTC", "BTC-ETH"];
+  state.wsStatus = {
+    connectionCount: 1,
+    openConnectionCount: 1,
+    connections: [{ status: "open", lastMessageAt: 1000 }],
+  };
+  state.validationWsStatus = {
+    connectionCount: 1,
+    openConnectionCount: 1,
+    connections: [{ status: "open", lastMessageAt: 1000 }],
+  };
+  state.getOrderbookStoreStatus = () => ({
+    observation: {
+      marketCount: 2,
+      staleCount: 2,
+      restOnlyCount: 0,
+      wsConfirmedCount: 2,
+      quietCount: 2,
+    },
+    validation: {
+      marketCount: 2,
+      staleCount: 2,
+      restOnlyCount: 0,
+      wsConfirmedCount: 2,
+      quietCount: 2,
+    },
+  });
+  await logStore.ensureFiles();
+
+  const runtime = new EngineRuntime({
+    runtimeDir: dir,
+    logStore,
+    commandStatusStore: new CommandStatusStore({ runtimeDir: dir }),
+    state,
+    runtimeConfig: DEFAULT_RUNTIME_CONFIG,
+  });
+  const gate = runtime.preparationGateStatus(10_000);
+
+  assert.equal(gate.ready, true);
+  assert.deepEqual(gate.blockers, []);
+  assert.equal(gate.progress.observationQuietCount, 2);
+  assert.equal(gate.progress.validationWsConfirmedCount, 2);
+});
+
+test("engine preparation gate ignores message-less connections after WS confirmation coverage is complete", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-prep-no-message-"));
+  const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
+  const state = fakeState();
+
+  state.requiredMarkets = ["KRW-BTC"];
+  state.wsStatus = {
+    connectionCount: 1,
+    openConnectionCount: 1,
+    connections: [{ status: "open", lastMessageAt: null }],
+  };
+  state.validationWsStatus = {
+    connectionCount: 1,
+    openConnectionCount: 1,
+    connections: [{ status: "open", lastMessageAt: 1000 }],
+  };
+  state.getOrderbookStoreStatus = () => ({
+    observation: { marketCount: 1, staleCount: 0, restOnlyCount: 0, wsConfirmedCount: 1, quietCount: 0 },
+    validation: { marketCount: 1, staleCount: 0, restOnlyCount: 0, wsConfirmedCount: 1, quietCount: 0 },
+  });
+  await logStore.ensureFiles();
+
+  const runtime = new EngineRuntime({
+    runtimeDir: dir,
+    logStore,
+    commandStatusStore: new CommandStatusStore({ runtimeDir: dir }),
+    state,
+    runtimeConfig: DEFAULT_RUNTIME_CONFIG,
+  });
+  const gate = runtime.preparationGateStatus(10_000);
+
+  assert.equal(gate.ready, true);
+  assert.deepEqual(gate.blockers, []);
+  assert.equal(gate.progress.missingMessageConnectionCount, 1);
+});
+
+test("engine preparation gate blocks message-less connections while WS confirmation is incomplete", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-prep-incomplete-ws-"));
+  const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
+  const state = fakeState();
+
+  state.requiredMarkets = ["KRW-BTC", "BTC-ETH"];
+  state.wsStatus = {
+    connectionCount: 1,
+    openConnectionCount: 1,
+    connections: [{ status: "open", lastMessageAt: null }],
+  };
+  state.validationWsStatus = {
+    connectionCount: 1,
+    openConnectionCount: 1,
+    connections: [{ status: "open", lastMessageAt: 1000 }],
+  };
+  state.getOrderbookStoreStatus = () => ({
+    observation: { marketCount: 2, staleCount: 0, restOnlyCount: 1, wsConfirmedCount: 1, quietCount: 0 },
+    validation: { marketCount: 2, staleCount: 0, restOnlyCount: 0, wsConfirmedCount: 2, quietCount: 0 },
+  });
+  await logStore.ensureFiles();
+
+  const runtime = new EngineRuntime({
+    runtimeDir: dir,
+    logStore,
+    commandStatusStore: new CommandStatusStore({ runtimeDir: dir }),
+    state,
+    runtimeConfig: DEFAULT_RUNTIME_CONFIG,
+  });
+  const gate = runtime.preparationGateStatus(10_000);
+
+  assert.equal(gate.ready, false);
+  assert.deepEqual(gate.blockers, ["WS_CONFIRMATION_INCOMPLETE", "WS_CONNECTION_NO_MESSAGES"]);
+});
+
 test("engine runtime rebuilds public feeds after fallback market discovery recovery", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-feed-rebuild-"));
   const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
@@ -279,6 +411,7 @@ test("engine runtime accepts fresh mode-aware commands and writes delta/status",
   });
 
   await runtime.processCommands();
+  await waitForState(runtime, "RUNNING");
   const status = await commandStatusStore.read("22222222-2222-4222-8222-222222222222");
   const delta = JSON.parse(await fs.readFile(path.join(dir, "latest-delta.json"), "utf8"));
   const events = await logStore.readAll("events");
@@ -327,6 +460,7 @@ test("engine runtime processes atomic command inbox files once", async () => {
 
   await runtime.processCommands();
   await runtime.processCommands();
+  await waitForState(runtime, "RUNNING");
   const status = await commandStatusStore.read("77777777-7777-4777-8777-777777777777");
   const commandAudit = await logStore.readAll("commands");
   const pending = await commandInbox.listPending();
@@ -369,11 +503,13 @@ test("engine runtime records readiness failures for rejected real-guarded CLI st
   });
 
   await runtime.processCommands();
+  await waitForState(runtime, "PREPARING_BLOCKED");
   const status = await commandStatusStore.read("88888888-8888-4888-8888-888888888888");
   const events = await logStore.readAll("events");
 
-  assert.equal(runtime.machine.state, "STOPPED");
-  assert.equal(observationClient.starts, 0);
+  assert.equal(runtime.machine.state, "PREPARING_BLOCKED");
+  assert.equal(observationClient.starts, 1);
+  assert.equal(observationClient.stops, 1);
   assert.equal(status.status, "rejected");
   assert.match(status.message, /REAL_GUARDED readiness checklist failed/);
   assert.equal(status.readiness.passed, false);
@@ -471,13 +607,12 @@ test("engine runtime gates REAL_AUTO start with readiness checks", async () => {
     startedAtEpochMs: Date.now() - 1000,
   });
 
-  await assert.rejects(
-    () => runtime.applyCommand("Start", { source: "operator" }),
-    /REAL_AUTO readiness checklist failed/,
-  );
+  const nextState = await runtime.applyCommand("Start", { source: "operator" });
+  assert.equal(nextState, "PREPARING");
+  await waitForState(runtime, "PREPARING_BLOCKED");
   const events = await logStore.readAll("events");
 
-  assert.equal(runtime.machine.state, "STOPPED");
+  assert.equal(runtime.machine.state, "PREPARING_BLOCKED");
   assert.equal(events.some((event) => event.type === "readiness.blocked" && event.readiness.passed === false), true);
 });
 
@@ -919,6 +1054,7 @@ test("engine runtime pause blocks new executions without stopping order manageme
   });
 
   await runtime.applyCommand("Start", { source: "operator", runMode: "DRY_RUN" });
+  await waitForState(runtime, "RUNNING");
   await runtime.applyCommand("Pause", { source: "operator" });
   const result = await runtime.handleExecutionCandidate({
     planId: "plan-paused",

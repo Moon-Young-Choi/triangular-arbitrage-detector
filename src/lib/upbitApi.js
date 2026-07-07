@@ -18,12 +18,15 @@ function sleep(ms) {
   });
 }
 
-async function fetchUpbitMarkets(client = axios) {
-  const response = await client.get(`${BASE_URL}/market/all`, {
+async function fetchUpbitMarkets(client = axios, options = {}) {
+  const execute = () => client.get(`${BASE_URL}/market/all`, {
     params: { is_details: "true" },
     headers: { Accept: "application/json" },
     timeout: 15000,
   });
+  const response = options.scheduler
+    ? await options.scheduler.scheduleRest("market", options.priority || "normal", "market/all", execute)
+    : await execute();
 
   if (!Array.isArray(response.data)) {
     throw new Error("Unexpected Upbit market/all response");
@@ -37,6 +40,9 @@ async function fetchOrderbooks(marketCodes, options = {}) {
     client = axios,
     batchSize = 50,
     delayMs = 200,
+    scheduler = null,
+    priority = "warmup",
+    onProgress = null,
   } = options;
 
   const uniqueMarkets = [...new Set(marketCodes)].sort();
@@ -48,11 +54,18 @@ async function fetchOrderbooks(marketCodes, options = {}) {
     const batch = batches[index];
 
     try {
-      const response = await client.get(`${BASE_URL}/orderbook`, {
+      const execute = () => client.get(`${BASE_URL}/orderbook`, {
         params: { markets: batch.join(",") },
         headers: { Accept: "application/json" },
         timeout: 15000,
       });
+      const response = scheduler
+        ? await scheduler.scheduleRest("orderbook", priority, "orderbook", execute, {
+            batchIndex: index,
+            batchCount: batches.length,
+            marketCount: batch.length,
+          })
+        : await execute();
 
       if (!Array.isArray(response.data)) {
         throw new Error("Unexpected Upbit orderbook response");
@@ -62,6 +75,14 @@ async function fetchOrderbooks(marketCodes, options = {}) {
         if (orderbook && orderbook.market) {
           orderbookMap.set(orderbook.market, orderbook);
         }
+      }
+      if (typeof onProgress === "function") {
+        onProgress({
+          batchIndex: index,
+          batchCount: batches.length,
+          requestedMarketCount: uniqueMarkets.length,
+          fetchedMarketCount: orderbookMap.size,
+        });
       }
     } catch (error) {
       errors.push({

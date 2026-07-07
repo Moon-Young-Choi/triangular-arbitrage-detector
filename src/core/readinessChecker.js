@@ -175,6 +175,10 @@ async function checkRealRunReadiness(options = {}) {
   const dryRunReportExists = dryRunReportPath ? await fileExists(dryRunReportPath) : dryRows.length > 0;
   const rejectionRate = drySummary.totalOpportunities > 0 ? drySummary.rejected / drySummary.totalOpportunities : 1;
   const startAssets = enabledStartAssets(config, drySummary);
+  const validationStore = stores.validation || {};
+  const validationStoreUsable = Object.hasOwn(validationStore, "wsConfirmedCount")
+    ? Number(validationStore.wsConfirmedCount || 0) > 0
+    : validationStore.staleCount === 0;
   const startAssetReadiness = perStartAssetReadinessItems({
     startAssets,
     dryRows: dryRunAudit.validRows,
@@ -197,7 +201,12 @@ async function checkRealRunReadiness(options = {}) {
     item("account-balance-fresh", "Account balance fresh", engineSnapshot.accountBalanceFresh === true),
     item("observation-feed-healthy", "Observation feed healthy", (feedStatus.observation || {}).openConnectionCount > 0),
     item("validation-feed-healthy", "Validation feed healthy", (feedStatus.validation || {}).openConnectionCount > 0),
-    item("validation-store-fresh", "Validation depth=30 store fresh", (stores.validation || {}).staleCount === 0),
+    item("validation-store-usable", "Validation depth=30 store usable", validationStoreUsable, {
+      wsConfirmedCount: validationStore.wsConfirmedCount ?? null,
+      staleCount: validationStore.staleCount ?? null,
+      restOnlyCount: validationStore.restOnlyCount ?? null,
+      quietCount: validationStore.quietCount ?? null,
+    }),
     item("dry-run-report-exists", "Dry-run report exists", dryRunReportExists),
     item("dry-run-audit-schema-complete", "Dry-run audit evidence schema complete", dryRunAudit.invalidCount === 0, {
       totalRows: dryRunAudit.totalRows,

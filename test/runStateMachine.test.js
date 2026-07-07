@@ -6,7 +6,9 @@ test("run state machine accepts safe Start Pause Stop transitions", () => {
   const events = [];
   const machine = new RunStateMachine({ log: (event) => events.push(event) });
 
-  assert.equal(machine.apply("Start"), STATES.RUNNING);
+  assert.equal(machine.apply("Start"), STATES.PREPARING);
+  assert.equal(machine.canAcceptNewOpportunity(), false);
+  assert.equal(machine.markReady(), STATES.RUNNING);
   assert.equal(machine.canAcceptNewOpportunity(), true);
   assert.equal(machine.apply("Pause"), STATES.PAUSED);
   assert.equal(machine.canAcceptNewOpportunity(), false);
@@ -22,8 +24,9 @@ test("run state machine rejects invalid commands and transitions", () => {
 
   assert.throws(() => normalizeCommand("Restart"), /Invalid engine command/);
   assert.throws(() => machine.apply("Pause"), /Cannot Pause while STOPPED/);
+  assert.throws(() => machine.markReady(), /Cannot mark ready while STOPPED/);
   machine.apply("Start");
-  assert.throws(() => machine.apply("Start"), /Cannot Start while RUNNING/);
+  assert.throws(() => machine.apply("Start"), /Cannot Start while PREPARING/);
 });
 
 test("run state machine can stop from ERROR after emergency stop", () => {

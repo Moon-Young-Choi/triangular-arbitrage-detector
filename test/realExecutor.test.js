@@ -13,6 +13,7 @@ const cycle = {
     { index: 0, fromAsset: "KRW", toAsset: "BTC", market: "KRW-BTC" },
     { index: 1, fromAsset: "BTC", toAsset: "KRW", market: "KRW-BTC" },
   ],
+  markets: ["KRW-BTC"],
 };
 
 function orderbook() {
@@ -715,6 +716,71 @@ test("real executor reprices each leg from latest validation orderbooks", async 
   assert.equal(submitted[1].price, "80");
   assert.equal(events.some((event) => event.type === "execution.reprice" && event.legIndex === 2), true);
   assert.equal(events.some((event) => event.type === "execution.state_changed" && event.executionState === "REPRICE_BEFORE_LEG_2"), true);
+});
+
+test("real executor recovers to start asset when repriced profit deteriorates", async () => {
+  const submitted = [];
+  const events = [];
+  const deepOrderbook = (askPrice, bidPrice) => ({
+    market: "KRW-BTC",
+    timestamp: Date.now(),
+    orderbook_units: [{ ask_price: askPrice, bid_price: bidPrice, ask_size: 1000, bid_size: 1000 }],
+  });
+  const validationSnapshots = [
+    new Map([["KRW-BTC", deepOrderbook(100, 100)]]),
+    new Map([["KRW-BTC", deepOrderbook(100, 80)]]),
+  ];
+  const executor = new RealExecutor({
+    liveTradingEnabled: true,
+    logStore: memoryLogStore(events),
+    runtimeConfig: {
+      executionMode: "LIMIT_IOC_AT_OBSERVED_BEST",
+      candidateValidation: { minOrderAmountByAsset: { BTC: 0, KRW: 0 } },
+      executionPolicy: {
+        realRunLimits: {},
+        marketDataGuards: {},
+        executionGuards: {},
+      },
+    },
+    restClient: {
+      async getOrderChance() {
+        return zeroMinMarketPolicy();
+      },
+      async createOrder(order) {
+        submitted.push(order);
+        return { uuid: `uuid-${submitted.length}`, ...order };
+      },
+      async getOrder(params) {
+        const order = submitted.find((item) => item.identifier === params.identifier);
+        return { ...order, uuid: params.uuid, executed_volume: order.volume || "1", avg_price: order.price || "80" };
+      },
+    },
+  });
+
+  const result = await executor.execute({
+    planId: "real-recover",
+    cycle,
+    startAmount: 10000,
+    expectedOutputAmount: 11000,
+    recoverOnRepriceLoss: true,
+    validationOrderbooks: validationSnapshots[0],
+  }, {
+    privateWsConnected: true,
+    orderChanceFresh: true,
+    accountBalanceFresh: true,
+    validationDepthFresh: true,
+    getValidationOrderbooks() {
+      return validationSnapshots.shift() || validationSnapshots[0];
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.recoveredToStart, true);
+  assert.equal(result.reason, "REPRICE_PROFIT_DETERIORATED");
+  assert.equal(submitted.length, 2);
+  assert.equal(submitted[1].side, "ask");
+  assert.equal(submitted[1].price, "80");
+  assert.equal(events.some((event) => event.type === "cycle.aborted" && event.recoveredToStart === true), true);
 });
 
 test("real executor records residual input when liquidity policy caps the submitted order", async () => {

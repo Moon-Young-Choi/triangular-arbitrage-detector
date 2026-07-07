@@ -36,6 +36,10 @@ function orderbook(market, units, metadata = {}) {
     orderbookLevel: metadata.orderbookLevel,
     traceId: metadata.traceId,
     localSequence: metadata.localSequence,
+    sourceState: metadata.sourceState,
+    wsConfirmed: metadata.wsConfirmed,
+    firstWsReceivedAt: metadata.firstWsReceivedAt,
+    lastWsReceivedAt: metadata.lastWsReceivedAt,
     orderbook_units: units,
   };
 }
@@ -109,6 +113,23 @@ test("depth simulation can reject order totals outside Upbit market policy", () 
   assert.equal(simulated.limitingMarket, "KRW-BTC");
   assert.equal(simulated.legs[0].orderTotal, 100);
   assert.equal(simulated.legs[0].maxOrderTotal, 50);
+});
+
+test("depth simulation allows quiet WS-confirmed orderbooks for calculation", () => {
+  const simulated = simulateCycleWithDepth(cycle, liquidOrderbooks({
+    timestamp: 1000,
+    receivedAt: 1000,
+    sourceState: "ws_confirmed",
+    wsConfirmed: true,
+    firstWsReceivedAt: 1000,
+    lastWsReceivedAt: 1000,
+  }), 100, 0, {
+    nowMs: 10000,
+    staleOrderbookMs: 500,
+    maxDepthLevels: 1,
+  });
+
+  assert.equal(simulated.available, true);
 });
 
 test("liquidity policy merges validation config and calculates limiting best-level use", () => {
@@ -190,6 +211,38 @@ test("candidate validation rejects best-level overconsumption and reports limit 
   assert.equal(validation.limitingMarket, "KRW-BTC");
   assert.equal(validation.bestLevelTouchRatio, 0.5);
   assert.equal(validation.maxExecutableStartAmount, 6000);
+});
+
+test("candidate validation can size from best-level residual minimum order value", () => {
+  const validation = validateDepthAwareCandidate(cycle, new Map([
+    ["KRW-BTC", orderbook("KRW-BTC", [{ ask_price: 100, bid_price: 99, ask_size: 100, bid_size: 100 }])],
+    ["BTC-ETH", orderbook("BTC-ETH", [{ ask_price: 0.1, bid_price: 0.09, ask_size: 100000, bid_size: 100000 }])],
+    ["KRW-ETH", orderbook("KRW-ETH", [{ ask_price: 21, bid_price: 20, ask_size: 100000, bid_size: 100000 }])],
+  ]), {
+    feeRate: 0,
+    nowMs: 1000,
+    maxDepthLevels: 1,
+    validateOrderTotals: true,
+    marketPolicyByMarket: new Map([
+      ["KRW-BTC", { bid: { minTotal: 5000, maxTotal: 1000000000 }, ask: { minTotal: 5000, maxTotal: 1000000000 } }],
+      ["BTC-ETH", { bid: { minTotal: 0.00005, maxTotal: 100000 }, ask: { minTotal: 0.00005, maxTotal: 100000 } }],
+      ["KRW-ETH", { bid: { minTotal: 5000, maxTotal: 1000000000 }, ask: { minTotal: 5000, maxTotal: 1000000000 } }],
+    ]),
+    config: {
+      sizingMode: "best-level-residual",
+      minOrderAmountByAsset: { KRW: 5000 },
+      maxTouchRatioPerBestLevel: 1,
+      minResidualRatioPerBestLevel: 0,
+      minResidualAbsoluteByAsset: { KRW: 0, BTC: 0, ETH: 0 },
+      minNetProfitRate: 0,
+    },
+  });
+
+  assert.equal(validation.accepted, true);
+  assert.equal(validation.sizingMode, "best-level-residual");
+  assert.equal(validation.executableStartAmount, 5000);
+  assert.equal(validation.sizingLegs[0].bestLevelTotal, 10000);
+  assert.equal(validation.sizingLegs[0].residualAfterCapTotal, 5000);
 });
 
 test("depth simulation and candidate validation use market and side specific fee policies", () => {

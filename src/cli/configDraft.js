@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const {
   DEFAULT_RUNTIME_CONFIG,
   DEFAULT_RUNTIME_CONFIG_PATH,
+  mergeRuntimeConfigDefaults,
   validateRuntimeConfig,
 } = require("../core/runtimeConfig");
 
@@ -26,11 +27,12 @@ async function writeJsonAtomic(filePath, value) {
 }
 
 async function readActiveConfig(configPath = DEFAULT_RUNTIME_CONFIG_PATH) {
-  return readJsonIfExists(configPath, JSON.parse(JSON.stringify(DEFAULT_RUNTIME_CONFIG)));
+  return mergeRuntimeConfigDefaults(await readJsonIfExists(configPath, DEFAULT_RUNTIME_CONFIG));
 }
 
 async function readDraftConfig(draftPath = DEFAULT_DRAFT_CONFIG_PATH) {
-  return readJsonIfExists(draftPath, null);
+  const draft = await readJsonIfExists(draftPath, null);
+  return draft ? mergeRuntimeConfigDefaults(draft) : null;
 }
 
 async function baseDraftConfig(options = {}) {

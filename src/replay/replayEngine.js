@@ -107,6 +107,8 @@ function replayCycle(cycle, options = {}) {
   const netMultiplier = netResult.available ? netResult.multiplier : null;
   const timestamps = legTimestamps(cycle, validationOrderbooks);
   const marketDataGuards = (runtimeConfig.executionPolicy && runtimeConfig.executionPolicy.marketDataGuards) || {};
+  const registry = options.strategyRegistry || createStrategyRegistry();
+  const strategy = registry.get(runtimeConfig.activeStrategyId || "depthAwareLimitIoc");
   const depthValidation = validateDepthAwareCandidate(cycle, validationOrderbooks, {
     feeRate,
     useDefaultFeePolicy: true,
@@ -117,6 +119,8 @@ function replayCycle(cycle, options = {}) {
     staleOrderbookMs,
     config: {
       ...(runtimeConfig.candidateValidation || {}),
+      sizingMode: strategy.defaultConfig && strategy.defaultConfig.sizingMode ||
+        runtimeConfig.candidateValidation && runtimeConfig.candidateValidation.sizingMode,
       expectedValidationOrderbookUnit: runtimeConfig.validationOrderbookUnit,
       maxValidationLegTimestampSkewMs: marketDataGuards.maxLegTimestampSkewMs,
       maxOldestValidationReceivedAgeMs: marketDataGuards.maxOldestLegAgeMs,
@@ -143,6 +147,10 @@ function replayCycle(cycle, options = {}) {
     netProfitRate: netMultiplier === null ? null : netMultiplier - 1,
     executableStartAmount: depthValidation.executableStartAmount,
     maxExecutableStartAmount: depthValidation.maxExecutableStartAmount,
+    sizingMode: depthValidation.sizingMode,
+    sizingReason: depthValidation.sizingReason,
+    sizingLiquidityStartAmount: depthValidation.sizingLiquidityStartAmount,
+    sizingLegs: depthValidation.sizingLegs,
     limitingLeg: depthValidation.limitingLeg,
     limitingMarket: depthValidation.limitingMarket,
     expectedSlippageBps: depthValidation.expectedSlippageBps,
@@ -163,8 +171,6 @@ function replayCycle(cycle, options = {}) {
       estimatedEndToDisplayMs: null,
     },
   };
-  const registry = options.strategyRegistry || createStrategyRegistry();
-  const strategy = registry.get(runtimeConfig.activeStrategyId || "depthAwareLimitIoc");
   const decision = strategy.evaluate({
     cycle,
     row,

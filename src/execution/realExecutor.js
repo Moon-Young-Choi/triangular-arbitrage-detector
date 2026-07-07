@@ -1,5 +1,5 @@
 const { parseMarket } = require("../lib/marketGraph");
-const { resolveLegFeeRate } = require("../lib/depthSimulator");
+const { resolveLegFeeRate, simulateCycleWithDepth } = require("../lib/depthSimulator");
 const { DEFAULT_EXECUTION_MODE, BEST_IOC_EXECUTION_MODE } = require("./executionModes");
 const {
   DEFAULT_PARTIAL_FILL_POLICY,
@@ -9,7 +9,7 @@ const {
 const { residualFromFill } = require("./residualAssetPolicy");
 const { RiskGuard } = require("./riskGuards");
 const { OrderManager } = require("./orderManager");
-const { diffNsToMs } = require("../core/timingTrace");
+const { diffNsToMs, perfNowNs } = require("../core/timingTrace");
 const { summarizeLatency } = require("../core/performanceBudget");
 const {
   loadMarketPolicy,
@@ -191,6 +191,30 @@ function cycleExecutionMeta(cycle = {}) {
     routeLabel: cycle.routeLabel,
     markets: Array.isArray(cycle.markets) ? cycle.markets.slice() : null,
   };
+}
+
+function recoveryStepFor(cycle = {}, fromAsset, toAsset) {
+  const markets = Array.isArray(cycle.markets) && cycle.markets.length > 0
+    ? cycle.markets
+    : [...new Set((cycle.steps || []).map((step) => step.market).filter(Boolean))];
+
+  for (const market of markets) {
+    const { quote, base } = parseMarket(market);
+    if (
+      (fromAsset === quote && toAsset === base) ||
+      (fromAsset === base && toAsset === quote)
+    ) {
+      return {
+        index: (cycle.steps || []).length,
+        fromAsset,
+        toAsset,
+        market,
+        recovery: true,
+      };
+    }
+  }
+
+  return null;
 }
 
 class RealExecutor {
@@ -394,6 +418,346 @@ class RealExecutor {
       orderType: plan.orderType || "limit",
       timeInForce: plan.timeInForce || "ioc",
     });
+  }
+
+  repriceRecoveryDecision(plan, step, amount, validationOrderbooks) {
+    if (plan.recoverOnRepriceLoss !== true || step.index <= 0) {
+      return { recover: false };
+    }
+
+    const remainingSteps = (plan.cycle.steps || []).slice(step.index);
+    if (remainingSteps.length === 0) {
+      return { recover: false };
+    }
+
+    const simulated = simulateCycleWithDepth(
+      {
+        ...plan.cycle,
+        steps: remainingSteps,
+      },
+      validationOrderbooks,
+      amount,
+      plan.feeRate || 0,
+      {
+        nowMs: Date.now(),
+        staleOrderbookMs: plan.staleOrderbookMs,
+        maxDepthLevels: plan.maxDepthLevels || 1,
+        validateOrderTotals: true,
+        feePolicyByMarket: plan.feePolicyByMarket,
+        marketPolicyByMarket: plan.marketPolicyByMarket,
+        useDefaultFeePolicy: plan.useDefaultFeePolicy === true,
+        expectedMaker: plan.expectedMaker === true,
+        orderType: plan.orderType || "limit",
+        timeInForce: plan.timeInForce || "ioc",
+      },
+    );
+    const expectedOutput = Number(plan.expectedOutputAmount);
+    const minOutput = Number.isFinite(expectedOutput) && expectedOutput > 0
+      ? expectedOutput
+      : Number(plan.startAmount) * (1 + Number(this.runtimeConfig.candidateValidation &&
+        this.runtimeConfig.candidateValidation.minNetProfitRate || 0));
+
+    if (!simulated.available) {
+      return {
+        recover: true,
+        reason: simulated.rejectionCode || "REPRICE_DEPTH_UNAVAILABLE",
+        projectedOutputAmount: null,
+        expectedOutputAmount: minOutput,
+      };
+    }
+
+    if (!(simulated.outputAmount >= minOutput)) {
+      return {
+        recover: true,
+        reason: "REPRICE_PROFIT_DETERIORATED",
+        projectedOutputAmount: simulated.outputAmount,
+        projectedProfitRate: Number(plan.startAmount) > 0
+          ? simulated.outputAmount / Number(plan.startAmount) - 1
+          : null,
+        expectedOutputAmount: minOutput,
+      };
+    }
+
+    return {
+      recover: false,
+      projectedOutputAmount: simulated.outputAmount,
+      projectedProfitRate: Number(plan.startAmount) > 0
+        ? simulated.outputAmount / Number(plan.startAmount) - 1
+        : null,
+      expectedOutputAmount: minOutput,
+    };
+  }
+
+  async executeRecoveryToStart(
+    plan,
+    fromAsset,
+    amount,
+    validationOrderbooks,
+    context,
+    reason,
+    details,
+    legResults,
+    cycleStartPerfNs = null,
+  ) {
+    const startAsset = plan.startAsset || (plan.cycle && plan.cycle.startAsset);
+    const recoveryStep = recoveryStepFor(plan.cycle, fromAsset, startAsset);
+    const legIndex = (plan.cycle.steps || []).length + 1;
+
+    if (!recoveryStep) {
+      this.emitCycleAborted(plan, {
+        legIndex,
+        reason: "RECOVERY_ROUTE_UNAVAILABLE",
+        originalReason: reason,
+        residualAsset: fromAsset,
+        actualAmount: amount,
+        ...details,
+      }, { legacyType: "cycle.real_fail" });
+      return {
+        ok: false,
+        reason: "RECOVERY_ROUTE_UNAVAILABLE",
+        originalReason: reason,
+        residualAsset: fromAsset,
+        actualAmount: amount,
+        legResults,
+        feeSummary: summarizeFees(legResults),
+      };
+    }
+
+    const orderbook = getOrderbook(validationOrderbooks, recoveryStep.market);
+    if (!orderbook) {
+      this.emitCycleAborted(plan, {
+        legIndex,
+        market: recoveryStep.market,
+        reason: "RECOVERY_ORDERBOOK_UNAVAILABLE",
+        originalReason: reason,
+        residualAsset: fromAsset,
+        actualAmount: amount,
+        ...details,
+      }, { legacyType: "cycle.real_fail" });
+      return {
+        ok: false,
+        reason: "RECOVERY_ORDERBOOK_UNAVAILABLE",
+        originalReason: reason,
+        residualAsset: fromAsset,
+        actualAmount: amount,
+        legResults,
+        feeSummary: summarizeFees(legResults),
+      };
+    }
+
+    const identifier = this.orderManager.createIdentifier({
+      planId: plan.planId,
+      cycleId: plan.cycle.cycleId,
+      legIndex,
+    });
+    const marketPolicy = await this.marketPolicyForLeg(recoveryStep, context);
+    const feePolicy = await this.feePolicyForLeg(recoveryStep, context);
+    const feeRate = this.resolveFeeRateForLeg(recoveryStep, plan, feePolicy);
+    const order = this.buildOrderForLeg(recoveryStep, amount, orderbook, identifier, marketPolicy, null, {
+      feeRate,
+    });
+    const orderTotalCheck = validateOrderTotal(order, marketPolicy);
+
+    if (!orderTotalCheck.ok) {
+      this.emitCycleAborted(plan, {
+        legIndex,
+        market: recoveryStep.market,
+        reason: orderTotalCheck.rejectionReason,
+        originalReason: reason,
+        residualAsset: fromAsset,
+        actualAmount: amount,
+        orderTotal: orderTotalCheck.total,
+        minTotal: orderTotalCheck.minTotal,
+        maxTotal: orderTotalCheck.maxTotal,
+        ...details,
+      }, { legacyType: "cycle.real_fail" });
+      return {
+        ok: false,
+        reason: orderTotalCheck.rejectionReason,
+        originalReason: reason,
+        residualAsset: fromAsset,
+        actualAmount: amount,
+        legResults,
+        feeSummary: summarizeFees(legResults),
+      };
+    }
+
+    const legStartPerfNs = perfNowNs();
+    this.emitState(plan, "RECOVERY_PLANNED", {
+      legIndex,
+      market: recoveryStep.market,
+      fromAsset,
+      toAsset: startAsset,
+      inputAmount: amount,
+      originalReason: reason,
+      ...details,
+    });
+    this.emit("orders", {
+      type: "order.intent",
+      planId: plan.planId,
+      cycleId: plan.cycle.cycleId,
+      startAsset,
+      strategyId: plan.strategyId,
+      legIndex,
+      recovery: true,
+      originalReason: reason,
+      order,
+      marketPolicy: marketPolicyMeta(marketPolicy),
+      feePolicy,
+    });
+
+    let submission;
+    this.riskGuard.recordOrderOpened();
+    try {
+      submission = await this.orderManager.submitOrder(order, {
+        planId: plan.planId,
+        cycleId: plan.cycle.cycleId,
+        startAsset,
+        strategyId: plan.strategyId,
+        engineState: this.activeEngineState,
+        legIndex,
+        market: recoveryStep.market,
+        recovery: true,
+      });
+    } catch (error) {
+      const failureReason = this.orderSubmitFailureReason(error);
+      this.emitCycleAborted(plan, {
+        legIndex,
+        market: recoveryStep.market,
+        reason: failureReason,
+        originalReason: reason,
+        residualAsset: fromAsset,
+        actualAmount: amount,
+        error: this.orderSubmitFailureDetails(error),
+        ...details,
+      }, { legacyType: "cycle.real_fail" });
+      return {
+        ok: false,
+        reason: failureReason,
+        originalReason: reason,
+        residualAsset: fromAsset,
+        actualAmount: amount,
+        legResults,
+        feeSummary: summarizeFees(legResults),
+      };
+    } finally {
+      this.riskGuard.recordOrderClosed();
+    }
+
+    const reconciliation = await this.orderManager.reconcileSubmittedOrder({
+      orderAck: submission.ack,
+      identifier: submission.identifier,
+      submittedOrder: submission.order,
+      metadata: {
+        planId: plan.planId,
+        cycleId: plan.cycle.cycleId,
+        startAsset,
+        strategyId: plan.strategyId,
+        engineState: this.activeEngineState,
+        legIndex,
+        market: recoveryStep.market,
+        recovery: true,
+      },
+    });
+    const fill = this.amountAfterFill(recoveryStep, reconciliation.order, order);
+
+    if (!fill.ok) {
+      this.emitCycleAborted(plan, {
+        legIndex,
+        market: recoveryStep.market,
+        reason: fill.reason,
+        originalReason: reason,
+        residualAsset: fromAsset,
+        actualAmount: amount,
+        ...details,
+      }, { legacyType: "cycle.real_fail" });
+      return {
+        ok: false,
+        reason: fill.reason,
+        originalReason: reason,
+        residualAsset: fromAsset,
+        actualAmount: amount,
+        legResults,
+        feeSummary: summarizeFees(legResults),
+      };
+    }
+
+    const executionLatency = {
+      orderAckMs: diffNsToMs(submission.orderAckPerfNs, submission.orderSubmitStartPerfNs),
+      reconciliationMs: diffNsToMs(reconciliation.reconciliationDonePerfNs, reconciliation.reconciliationStartedPerfNs),
+      orderQueryMs: diffNsToMs(reconciliation.orderQueryDonePerfNs, reconciliation.reconciliationStartedPerfNs),
+      privateWsFillMs: diffNsToMs(reconciliation.privateWsFillReceivePerfNs, submission.orderSubmitStartPerfNs),
+      legTotalMs: diffNsToMs(perfNowNs(), legStartPerfNs),
+      source: reconciliation.source,
+    };
+    const recoveryLeg = {
+      legIndex,
+      market: recoveryStep.market,
+      side: order.side,
+      fromAsset,
+      toAsset: startAsset,
+      inputAmount: amount,
+      outputAmount: fill.amount,
+      avgPrice: fill.avgPrice,
+      submittedPrice: order.price,
+      observedBestPrice: order.observedBestPrice,
+      paidFee: fill.paidFee,
+      tradeFee: fill.tradeFee,
+      feeRate: order.feeRate,
+      feeAmount: fill.feeAmount,
+      feeAsset: fill.feeAsset,
+      tradeAmount: fill.tradeAmount,
+      grossOutputAmount: fill.grossOutputAmount,
+      netOutputAmount: fill.netOutputAmount,
+      recovery: true,
+      recoveryReason: reason,
+      bestLevelTouchRatio: order.bestLevelTouchRatio,
+      uuid: reconciliation.order && reconciliation.order.uuid,
+      identifier: submission.identifier,
+      source: reconciliation.source,
+      executionLatency,
+      latencySummary: summarizeLatency({ execution: executionLatency }),
+    };
+    const recoveredLegResults = [...legResults, recoveryLeg];
+    const pnl = fill.amount - Number(plan.startAmount);
+    const feeSummary = summarizeFees(recoveredLegResults);
+    const cycleExecutionLatency = {
+      cycleTotalMs: diffNsToMs(perfNowNs(), cycleStartPerfNs),
+      legs: recoveredLegResults.map((leg) => ({
+        legIndex: leg.legIndex,
+        market: leg.market,
+        ...(leg.executionLatency || {}),
+      })),
+    };
+
+    this.emitCycleAborted(plan, {
+      legIndex,
+      market: recoveryStep.market,
+      reason,
+      recoveredToStart: true,
+      recoveryAsset: startAsset,
+      recoveryOutputAmount: fill.amount,
+      outputAmount: fill.amount,
+      pnl,
+      profitRate: Number(plan.startAmount) > 0 ? pnl / Number(plan.startAmount) : null,
+      legResults: recoveredLegResults,
+      feeSummary,
+      cycleExecutionLatency,
+      ...details,
+    });
+
+    return {
+      ok: false,
+      reason,
+      recoveredToStart: true,
+      recoveryAsset: startAsset,
+      outputAmount: fill.amount,
+      pnl,
+      profitRate: Number(plan.startAmount) > 0 ? pnl / Number(plan.startAmount) : null,
+      legResults: recoveredLegResults,
+      feeSummary,
+      cycleExecutionLatency,
+    };
   }
 
   buildOrderForLeg(step, amount, orderbook, identifier, marketPolicy = null, liquidityPolicyOverride = null, feeContext = {}) {
@@ -677,6 +1041,7 @@ class RealExecutor {
     }
 
     let amount = Number(plan.startAmount);
+    const cycleStartPerfNs = perfNowNs();
     const legResults = [];
     this.riskGuard.recordCycleStart(context.nowMs || Date.now());
     this.emitState(plan, "CANDIDATE_ACCEPTED", {
@@ -686,6 +1051,7 @@ class RealExecutor {
 
     for (const step of plan.cycle.steps) {
       const legIndex = step.index + 1;
+      const legStartPerfNs = perfNowNs();
       const legInputAmount = amount;
       this.emitState(plan, `LEG_${legIndex}_PLANNED`, {
         legIndex,
@@ -753,6 +1119,36 @@ class RealExecutor {
 
       const validationOrderbooks = await this.validationOrderbooksForLeg(plan, context);
       const orderbook = getOrderbook(validationOrderbooks, step.market);
+      const recoveryDecision = this.repriceRecoveryDecision(plan, step, amount, validationOrderbooks);
+
+      if (recoveryDecision.recover) {
+        this.emitState(plan, "REPRICE_RECOVERY_TRIGGERED", {
+          legIndex,
+          market: step.market,
+          reason: recoveryDecision.reason,
+          residualAsset: step.fromAsset,
+          actualAmount: amount,
+          projectedOutputAmount: recoveryDecision.projectedOutputAmount,
+          projectedProfitRate: recoveryDecision.projectedProfitRate,
+          expectedOutputAmount: recoveryDecision.expectedOutputAmount,
+        });
+        return this.executeRecoveryToStart(
+          plan,
+          step.fromAsset,
+          amount,
+          validationOrderbooks,
+          context,
+          recoveryDecision.reason,
+          {
+            projectedOutputAmount: recoveryDecision.projectedOutputAmount,
+            projectedProfitRate: recoveryDecision.projectedProfitRate,
+            expectedOutputAmount: recoveryDecision.expectedOutputAmount,
+          },
+          legResults,
+          cycleStartPerfNs,
+        );
+      }
+
       this.emit("orders", {
         type: "execution.reprice",
         planId: plan.planId,
@@ -931,6 +1327,7 @@ class RealExecutor {
           engineState: this.activeEngineState,
           legIndex,
           market: step.market,
+          orderCapacityReservation: context.orderCapacityReservation || null,
         });
       } catch (error) {
         const reason = this.orderSubmitFailureReason(error);
@@ -1034,6 +1431,7 @@ class RealExecutor {
           reconciliation.privateWsFillReceivePerfNs,
           submission.orderSubmitStartPerfNs,
         ),
+        legTotalMs: null,
         source: reconciliation.source,
       };
       const latencySummary = summarizeLatency({
@@ -1075,6 +1473,7 @@ class RealExecutor {
       }
 
       amount = fill.amount;
+      executionLatency.legTotalMs = diffNsToMs(perfNowNs(), legStartPerfNs);
       const legResult = {
         legIndex,
         market: step.market,
@@ -1110,6 +1509,8 @@ class RealExecutor {
         uuid: reconciled && reconciled.uuid,
         identifier: submission.identifier,
         source: reconciliation.source,
+        executionLatency,
+        latencySummary,
       };
       legResults.push(legResult);
       if (fill.isPartial) {
@@ -1283,11 +1684,20 @@ class RealExecutor {
 
     this.riskGuard.recordSuccess();
     const feeSummary = summarizeFees(legResults);
+    const cycleExecutionLatency = {
+      cycleTotalMs: diffNsToMs(perfNowNs(), cycleStartPerfNs),
+      legs: legResults.map((leg) => ({
+        legIndex: leg.legIndex,
+        market: leg.market,
+        ...(leg.executionLatency || {}),
+      })),
+    };
     const pnl = amount - Number(plan.startAmount);
     this.emitState(plan, "CYCLE_DONE", {
       outputAmount: amount,
       pnl,
       feeSummary,
+      cycleExecutionLatency,
     });
     this.emitCycleDone(plan, {
       startAmount: Number(plan.startAmount),
@@ -1295,6 +1705,7 @@ class RealExecutor {
       pnl,
       feeSummary,
       legResults,
+      cycleExecutionLatency,
     });
 
     return {
@@ -1308,6 +1719,7 @@ class RealExecutor {
       pnl,
       feeSummary,
       legResults,
+      cycleExecutionLatency,
     };
   }
 }

@@ -1,6 +1,8 @@
 const STATES = Object.freeze({
   STOPPED: "STOPPED",
   STARTING: "STARTING",
+  PREPARING: "PREPARING",
+  PREPARING_BLOCKED: "PREPARING_BLOCKED",
   RUNNING: "RUNNING",
   PAUSING: "PAUSING",
   PAUSED: "PAUSED",
@@ -70,7 +72,7 @@ class RunStateMachine {
   start() {
     if (this.state === STATES.STOPPED) {
       this.transition(STATES.STARTING, "Start command");
-      return this.transition(STATES.RUNNING, "Engine started");
+      return this.transition(STATES.PREPARING, "Engine preparing market data");
     }
 
     if (this.state === STATES.PAUSED) {
@@ -78,6 +80,22 @@ class RunStateMachine {
     }
 
     throw new Error(`Cannot Start while ${this.state}`);
+  }
+
+  markReady() {
+    if (this.state !== STATES.PREPARING) {
+      throw new Error(`Cannot mark ready while ${this.state}`);
+    }
+
+    return this.transition(STATES.RUNNING, "Engine preparation complete");
+  }
+
+  blockPreparation(reason = "Preparation blocked") {
+    if (this.state !== STATES.PREPARING) {
+      throw new Error(`Cannot block preparation while ${this.state}`);
+    }
+
+    return this.transition(STATES.PREPARING_BLOCKED, reason);
   }
 
   pause() {
@@ -90,7 +108,13 @@ class RunStateMachine {
   }
 
   stop() {
-    if (this.state === STATES.RUNNING || this.state === STATES.PAUSED || this.state === STATES.ERROR) {
+    if (
+      this.state === STATES.PREPARING ||
+      this.state === STATES.PREPARING_BLOCKED ||
+      this.state === STATES.RUNNING ||
+      this.state === STATES.PAUSED ||
+      this.state === STATES.ERROR
+    ) {
       this.transition(STATES.STOPPING, "Stop command");
       return this.transition(STATES.STOPPED, "Engine stopped");
     }

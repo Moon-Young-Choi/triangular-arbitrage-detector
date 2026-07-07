@@ -10,6 +10,7 @@
     "triangles": "node scripts/scan-triangles.js",
     "triangles:live": "node scripts/deprecated-browser-dashboard.js",
     "engine": "node scripts/run-engine.js",
+    "contracts": "node scripts/run-contracts-monitor.js",
     "cli": "node scripts/qg-cli.js",
     "cli:watch": "node scripts/qg-cli.js /watch",
     "cli:logs": "node scripts/qg-cli.js /logs --follow",

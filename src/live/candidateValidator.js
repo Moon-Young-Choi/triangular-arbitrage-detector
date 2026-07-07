@@ -6,6 +6,7 @@ const {
   mergeValidationConfig,
 } = require("../core/liquidityPolicy");
 const { REJECTION_REASONS } = require("../core/rejectionReasons");
+const { computeBestLevelResidualStartAmount } = require("../strategies/bestLevelSizing");
 
 function orderbookForMarket(orderbooks, market) {
   if (!orderbooks) return null;
@@ -75,6 +76,50 @@ function configuredNumber(value) {
 
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function sizingFields(sizing = {}) {
+  return {
+    sizingMode: sizing.mode || null,
+    sizingReason: sizing.reason || null,
+    sizingLiquidityStartAmount: sizing.liquidityStartAmount ?? null,
+    sizingLegs: sizing.legs || [],
+  };
+}
+
+function resolveCandidateStartAmount(cycle, orderbooks, config, options = {}) {
+  const startAsset = cycle.startAsset || (Array.isArray(cycle.route) ? cycle.route[0] : null);
+  const configuredStartAmount = Number(options.startAmount || config.startAmountByAsset[startAsset] || 1);
+
+  if (options.startAmount !== undefined || config.sizingMode !== "best-level-residual") {
+    return {
+      ok: true,
+      mode: "configured",
+      reason: null,
+      startAsset,
+      startAmount: configuredStartAmount,
+      liquidityStartAmount: null,
+      legs: [],
+    };
+  }
+
+  const sizing = computeBestLevelResidualStartAmount(cycle, orderbooks, {
+    config,
+    feeRate: options.feeRate || 0,
+    feePolicyByMarket: options.feePolicyByMarket,
+    marketPolicyByMarket: options.marketPolicyByMarket,
+    useDefaultFeePolicy: options.useDefaultFeePolicy === true,
+    expectedMaker: options.expectedMaker === true,
+    orderType: options.orderType || "limit",
+    timeInForce: options.timeInForce || "ioc",
+    nowMs: options.nowMs,
+  });
+
+  if (!sizing.ok) {
+    return sizing;
+  }
+
+  return sizing;
 }
 
 function rejectWithConsistency(reason, startAmount, consistency, partial = {}) {
@@ -263,7 +308,7 @@ function collectMarketDataConsistency(cycle, validationOrderbooks, observationOr
   return common;
 }
 
-function summarizeAccepted(startAmount, simulated, config, consistency) {
+function summarizeAccepted(startAmount, simulated, config, consistency, sizing = {}) {
   const maxTouch = Math.max(...simulated.legs.map((leg) => leg.bestLevelTouchRatio || 0));
   const maxSlippage = Math.max(...simulated.legs.map((leg) => leg.expectedSlippageBps || 0));
   const limiting = limitingLegFor(simulated.legs, config);
@@ -282,6 +327,7 @@ function summarizeAccepted(startAmount, simulated, config, consistency) {
       bestLevelTouchRatio: maxTouch,
       residualAfterOrder: limiting.residualAfterOrder,
       depthLegs: simulated.legs,
+      ...sizingFields(sizing),
       ...marketDataConsistencyFields(consistency),
     };
   }
@@ -300,6 +346,7 @@ function summarizeAccepted(startAmount, simulated, config, consistency) {
       bestLevelTouchRatio: maxTouch,
       residualAfterOrder: null,
       depthLegs: simulated.legs,
+      ...sizingFields(sizing),
       ...marketDataConsistencyFields(consistency),
     };
   }
@@ -317,6 +364,7 @@ function summarizeAccepted(startAmount, simulated, config, consistency) {
     bestLevelTouchRatio: maxTouch,
     residualAfterOrder: null,
     depthLegs: simulated.legs,
+    ...sizingFields(sizing),
     ...marketDataConsistencyFields(consistency),
   };
 }
@@ -324,7 +372,8 @@ function summarizeAccepted(startAmount, simulated, config, consistency) {
 function validateDepthAwareCandidate(cycle, orderbooks, options = {}) {
   const config = mergeValidationConfig(options.config);
   const startAsset = cycle.startAsset || (Array.isArray(cycle.route) ? cycle.route[0] : null);
-  const startAmount = Number(options.startAmount || config.startAmountByAsset[startAsset] || 1);
+  const sizing = resolveCandidateStartAmount(cycle, orderbooks, config, options);
+  const startAmount = Number(sizing.startAmount);
   const minOrderAmount = Number(config.minOrderAmountByAsset[startAsset] || 0);
   const consistency = collectMarketDataConsistency(
     cycle,
@@ -333,6 +382,25 @@ function validateDepthAwareCandidate(cycle, orderbooks, options = {}) {
     options.nowMs || Date.now(),
     config,
   );
+
+  if (!sizing.ok || !(startAmount > 0)) {
+    return {
+      accepted: false,
+      validationStatus: "rejected",
+      validationReason: REJECTION_REASONS.BEST_LEVEL_SIZE_UNAVAILABLE,
+      rejectionCode: REJECTION_REASONS.BEST_LEVEL_SIZE_UNAVAILABLE,
+      executableStartAmount: startAmount,
+      maxExecutableStartAmount: null,
+      limitingLeg: sizing.limitingLeg || null,
+      limitingMarket: sizing.limitingMarket || null,
+      expectedSlippageBps: null,
+      bestLevelTouchRatio: null,
+      residualAfterOrder: null,
+      depthLegs: [],
+      ...sizingFields(sizing),
+      ...marketDataConsistencyFields(consistency),
+    };
+  }
 
   if (startAmount < minOrderAmount) {
     return {
@@ -348,6 +416,7 @@ function validateDepthAwareCandidate(cycle, orderbooks, options = {}) {
       bestLevelTouchRatio: null,
       residualAfterOrder: null,
       depthLegs: [],
+      ...sizingFields(sizing),
       ...marketDataConsistencyFields(consistency),
     };
   }
@@ -355,6 +424,7 @@ function validateDepthAwareCandidate(cycle, orderbooks, options = {}) {
   if (!consistency.ok) {
     return rejectWithConsistency(consistency.rejectionCode, startAmount, consistency, {
       limitingMarket: consistency.limitingMarket || null,
+      ...sizingFields(sizing),
     });
   }
 
@@ -386,11 +456,12 @@ function validateDepthAwareCandidate(cycle, orderbooks, options = {}) {
       bestLevelTouchRatio: null,
       residualAfterOrder: null,
       depthLegs: simulated.legs || [],
+      ...sizingFields(sizing),
       ...marketDataConsistencyFields(consistency),
     };
   }
 
-  return summarizeAccepted(startAmount, simulated, config, consistency);
+  return summarizeAccepted(startAmount, simulated, config, consistency, sizing);
 }
 
 module.exports = {

@@ -68,6 +68,8 @@ class UpbitWsOrderbookClient extends EventEmitter {
     this.reconnectMinMs = options.reconnectMinMs || 3000;
     this.reconnectMaxMs = options.reconnectMaxMs || 30000;
     this.pingIntervalMs = options.pingIntervalMs || 20000;
+    this.scheduler = options.scheduler || null;
+    this.feedName = options.feedName || "public";
     this.connections = new Map();
     this.stopped = false;
   }
@@ -106,12 +108,11 @@ class UpbitWsOrderbookClient extends EventEmitter {
   }
 
   openConnection(index, markets, reconnectAttempt) {
-    const ws = new WebSocket(this.endpoint);
     const connection = {
       index,
       markets,
-      ws,
-      status: "connecting",
+      ws: null,
+      status: "queued",
       reconnectAttempt,
       lastMessageAt: null,
       pingTimer: null,
@@ -121,21 +122,56 @@ class UpbitWsOrderbookClient extends EventEmitter {
     this.connections.set(index, connection);
     this.emitStatus();
 
-    ws.on("open", () => {
+    const open = () => {
+      if (this.stopped) return null;
+      const ws = new WebSocket(this.endpoint);
+      connection.ws = ws;
+      connection.status = "connecting";
+      this.emitStatus();
+
+      ws.on("open", () => {
       connection.status = "open";
       connection.reconnectAttempt = 0;
       const codes = markets.map((market) => `${market}.${this.orderbookUnit}`);
       const ticket = `q-gagarin-live-${index}-${crypto.randomUUID()}`;
 
-      ws.send(
-        JSON.stringify([
-          { ticket },
-          {
-            type: "orderbook",
-            codes,
-          },
-        ]),
-      );
+      const payload = JSON.stringify([
+        { ticket },
+        {
+          type: "orderbook",
+          codes,
+        },
+      ]);
+      const sendSubscription = () => new Promise((resolve, reject) => {
+        ws.send(payload, (error) => {
+          if (error) reject(error);
+          else resolve({ ok: true });
+        });
+      });
+      const connectionKey = `${this.feedName}:${index}`;
+      if (this.scheduler && typeof this.scheduler.scheduleWebSocketMessage === "function") {
+        this.scheduler.scheduleWebSocketMessage(
+          connectionKey,
+          "warmup",
+          "orderbook-subscribe",
+          sendSubscription,
+          { feedName: this.feedName, connectionIndex: index, marketCount: markets.length },
+        ).catch((error) => {
+          this.emit("error", {
+            type: "websocket-message",
+            message: error.message,
+            connectionIndex: index,
+          });
+        });
+      } else {
+        sendSubscription().catch((error) => {
+          this.emit("error", {
+            type: "websocket-message",
+            message: error.message,
+            connectionIndex: index,
+          });
+        });
+      }
 
       connection.pingTimer = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
@@ -144,9 +180,9 @@ class UpbitWsOrderbookClient extends EventEmitter {
       }, this.pingIntervalMs);
 
       this.emitStatus();
-    });
+      });
 
-    ws.on("message", (data) => {
+      ws.on("message", (data) => {
       const serverReceiveEpochMs = Date.now();
       const serverReceivePerfMs = performance.now();
       const parseStartPerfNs = perfNowNs();
@@ -177,17 +213,17 @@ class UpbitWsOrderbookClient extends EventEmitter {
           connectionIndex: index,
         });
       }
-    });
+      });
 
-    ws.on("error", (error) => {
+      ws.on("error", (error) => {
       this.emit("error", {
         type: "websocket",
         message: error.message,
         connectionIndex: index,
       });
-    });
+      });
 
-    ws.on("close", (code, reason) => {
+      ws.on("close", (code, reason) => {
       clearInterval(connection.pingTimer);
       connection.status = "closed";
       connection.closeCode = code;
@@ -207,7 +243,29 @@ class UpbitWsOrderbookClient extends EventEmitter {
         }, delayMs);
         this.emitStatus();
       }
-    });
+      });
+
+      return ws;
+    };
+
+    if (this.scheduler && typeof this.scheduler.scheduleWebSocketConnect === "function") {
+      this.scheduler.scheduleWebSocketConnect(
+        reconnectAttempt > 0 ? "normal" : "warmup",
+        "public-orderbook-connect",
+        open,
+        { feedName: this.feedName, connectionIndex: index, marketCount: markets.length },
+      ).catch((error) => {
+        connection.status = "failed";
+        this.emitStatus();
+        this.emit("error", {
+          type: "websocket-connect",
+          message: error.message,
+          connectionIndex: index,
+        });
+      });
+    } else {
+      open();
+    }
   }
 
   getStatus() {
