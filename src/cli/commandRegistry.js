@@ -19,6 +19,7 @@ const {
   writeJsonAtomic,
 } = require("./configDraft");
 const { renderKeyValues, renderTable } = require("./renderers/table");
+const { renderContracts } = require("./renderers/contracts");
 
 const COMMANDS = [
   ["/help", "List slash commands or show command help"],
@@ -34,8 +35,9 @@ const COMMANDS = [
   ["/strategy list|active|explain|select", "Inspect or select configured strategy"],
   ["/system", "Show system status; subcommands: perf, latency, guards, files"],
   ["/latency", "Show latency/performance budget"],
-  ["/execution", "Show execution balances, orders, fills, and guards"],
+  ["/execution", "Show execution balances, contracts, orders, fills, and guards"],
   ["/balances", "Show dry-run and real balance snapshots"],
+  ["/contracts [--follow] [--mode DRY_RUN|REAL]", "Show executed dry-run/real contract details"],
   ["/logs [--kind events|decisions|orders|fills|errors] [--follow]", "Read append-only logs"],
   ["/dryrun report [--format json|csv]", "Show dry-run review report"],
   ["/replay dryrun", "Replay dry-run from TAPE_JSON/CYCLES_JSON without exchange access"],
@@ -86,6 +88,14 @@ function createCliContext(options = {}) {
 
 function write(context, text = "") {
   context.output.write(`${text}\n`);
+}
+
+function cliColorEnabled(context = {}, options = {}) {
+  const colorOption = String(options.color || "").toLowerCase();
+  if (colorOption === "always") return true;
+  if (options["no-color"] === true || colorOption === "never" || process.env.NO_COLOR) return false;
+  if (process.env.FORCE_COLOR && process.env.FORCE_COLOR !== "0") return true;
+  return context.output && context.output.isTTY === true;
 }
 
 function formatPercent(value) {
@@ -1035,6 +1045,48 @@ async function readLogsForCommand(parsed, context) {
   });
 }
 
+function normalizeContractLogMode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return "";
+  if (normalized === "dry" || normalized === "dry-run" || normalized === "dry_run") return "DRY_RUN";
+  if (normalized === "real" || normalized === "real-guarded" || normalized === "real_guarded" || normalized === "real-auto" || normalized === "real_auto") return "REAL";
+  const upper = normalized.toUpperCase();
+  return upper.startsWith("REAL") ? "REAL" : upper;
+}
+
+async function readContractsForCommand(parsed, context) {
+  const limit = Number.parseInt(parsed.options.limit || "10", 10);
+  const result = await context.telemetry.logs({
+    kind: "all",
+    limit: Number.isInteger(limit) && limit > 0 ? limit : 10,
+    mode: normalizeContractLogMode(parsed.options.mode || parsed.options.runMode || ""),
+    startAsset: parsed.options.start || parsed.options.startAsset || "",
+    strategyId: parsed.options.strategy || parsed.options.strategyId || "",
+    cycleId: parsed.options.cycle || parsed.options.cycleId || "",
+    type: "cycle",
+    sinceMs: parsed.options.sinceMs || "",
+    from: parsed.options.from || "",
+    to: parsed.options.to || "",
+  });
+
+  return {
+    ...result,
+    logs: result.logs.filter((row) => row.type === "cycle.done"),
+  };
+}
+
+async function seedExistingContractLogs(parsed, context) {
+  const result = await readContractsForCommand({
+    ...parsed,
+    options: {
+      ...parsed.options,
+      limit: parsed.options.seedLimit || parsed.options.limit || "500",
+    },
+  }, context);
+
+  filterNewLogs(result.logs, context);
+}
+
 async function runOnce(parsed, context) {
   const snapshotCommands = new Set([
     "status",
@@ -1114,6 +1166,21 @@ async function runOnce(parsed, context) {
     return { exit: false, output: renderOpportunity(row, action) };
   }
 
+  if (parsed.name === "contracts" || (parsed.name === "execution" && parsed.args[0] === "contracts")) {
+    const contractsParsed = parsed.name === "execution"
+      ? { ...parsed, args: parsed.args.slice(1) }
+      : parsed;
+    const result = await readContractsForCommand(contractsParsed, context);
+
+    if (parsed.options.json) return { exit: false, output: JSON.stringify(result.logs, null, 2) };
+    return {
+      exit: false,
+      output: renderContracts(result.logs, {
+        color: cliColorEnabled(context, parsed.options),
+      }),
+    };
+  }
+
   if (snapshotCommands.has(parsed.name)) {
     const snapshot = await context.telemetry.snapshot();
     if (parsed.name === "desk" && (parsed.options.csv || parsed.options.format || parsed.options.json)) {
@@ -1186,6 +1253,34 @@ async function runOnce(parsed, context) {
 }
 
 async function runCliCommand(parsed, context) {
+  if (parsed.name === "start" && parsed.options.follow) {
+    await seedExistingContractLogs(parsed, context);
+    const startResult = await runOnce({
+      ...parsed,
+      options: {
+        ...parsed.options,
+        follow: false,
+        watch: false,
+      },
+    }, context);
+
+    if (startResult.output) write(context, startResult.output);
+
+    const runMode = modeFromStartArg(parsed.args[0]);
+    return runWatch({
+      name: "contracts",
+      args: [],
+      raw: "/contracts --follow",
+      options: {
+        ...parsed.options,
+        follow: true,
+        watch: false,
+        mode: normalizeContractLogMode(runMode),
+        limit: parsed.options.limit || "50",
+      },
+    }, context);
+  }
+
   if (parsed.name === "watch") {
     return runWatch({
       ...parsed,
@@ -1210,6 +1305,18 @@ async function runWatch(parsed, context) {
   const follow = parsed.options.follow === true;
 
   while (true) {
+    if (follow && parsed.name === "contracts") {
+      const result = await readContractsForCommand(parsed, context);
+      const rows = filterNewLogs(result.logs, context);
+      if (rows.length > 0) {
+        write(context, parsed.options.json ? JSON.stringify(rows, null, 2) : renderContracts(rows, {
+          color: cliColorEnabled(context, parsed.options),
+        }));
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.max(250, context.pollIntervalMs)));
+      continue;
+    }
+
     if (follow && parsed.name === "logs") {
       const result = await readLogsForCommand(parsed, context);
       const rows = filterNewLogs(result.logs, context);

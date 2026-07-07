@@ -2,6 +2,17 @@ const { simulateCycleWithDepth } = require("../lib/depthSimulator");
 const { mergeValidationConfig } = require("../live/candidateValidator");
 const { CapitalAllocator } = require("./capitalAllocator");
 
+function cycleExecutionMeta(cycle = {}) {
+  return {
+    triangleId: cycle.triangleId,
+    direction: cycle.direction,
+    directionLabel: cycle.directionLabel,
+    route: Array.isArray(cycle.route) ? cycle.route.slice() : null,
+    routeLabel: cycle.routeLabel,
+    markets: Array.isArray(cycle.markets) ? cycle.markets.slice() : null,
+  };
+}
+
 class DryRunExecutor {
   constructor(options = {}) {
     this.capitalAllocator = options.capitalAllocator || new CapitalAllocator({
@@ -135,6 +146,7 @@ class DryRunExecutor {
       latencyMs: plan.latencyMs,
       bestLevelTouchRatio: plan.bestLevelTouchRatio,
       expectedSlippageBps: plan.expectedSlippageBps,
+      ...cycleExecutionMeta(plan.cycle),
     };
     const guarded = this.guard(plan);
 
@@ -191,8 +203,12 @@ class DryRunExecutor {
       {
         nowMs: plan.nowMs,
         staleOrderbookMs: plan.staleOrderbookMs,
+        maxDepthLevels: plan.maxDepthLevels || 1,
+        validateOrderTotals: true,
         feePolicyByMarket: plan.feePolicyByMarket,
+        marketPolicyByMarket: plan.marketPolicyByMarket,
         resolveLegFee: plan.resolveLegFee,
+        useDefaultFeePolicy: plan.useDefaultFeePolicy === true,
         expectedMaker: plan.expectedMaker === true,
         orderType: plan.orderType || "limit",
         timeInForce: plan.timeInForce || "ioc",
@@ -228,11 +244,25 @@ class DryRunExecutor {
         ...planMeta,
         legIndex: leg.legIndex,
         market: leg.market,
+        side: leg.feeSide,
+        fromAsset: leg.fromAsset,
+        toAsset: leg.toAsset,
         inputAmount: leg.inputAmount,
         outputAmount: leg.outputAmount,
+        action: leg.action,
+        usedSide: leg.usedSide,
         feeSide: leg.feeSide,
         feeRate: leg.feeRate,
+        feeAmount: leg.feeAmount,
+        feeAsset: leg.feeAsset,
+        tradeAmount: leg.tradeAmount,
+        grossOutputAmount: leg.grossOutputAmount,
+        netOutputAmount: leg.netOutputAmount,
+        averagePrice: leg.averagePrice,
+        bestPrice: leg.bestPrice,
         expectedSlippageBps: leg.expectedSlippageBps,
+        bestLevelTouchRatio: leg.bestLevelTouchRatio,
+        residualAfterOrder: leg.residualAfterOrder,
       });
     }
 
@@ -241,20 +271,28 @@ class DryRunExecutor {
     this.emit("cycle.simulated_done", {
       ...planMeta,
       startAsset: guarded.startAsset,
+      startAmount: guarded.startAmount,
       pnl,
       outputAmount: simulated.outputAmount,
       profitRate: simulated.profitRate,
       simulatedNetProfit: pnl,
       expectedSimulatedGap: Number(plan.expectedNetProfit || 0) - pnl,
+      legResults: simulated.legs,
+      capitalBefore: guarded.capital,
+      capitalAfter: settled.bucket,
       capital: settled.bucket,
     });
     this.emitCycleDone(planMeta, {
       startAsset: guarded.startAsset,
+      startAmount: guarded.startAmount,
       pnl,
       outputAmount: simulated.outputAmount,
       profitRate: simulated.profitRate,
       simulatedNetProfit: pnl,
       expectedSimulatedGap: Number(plan.expectedNetProfit || 0) - pnl,
+      legResults: simulated.legs,
+      capitalBefore: guarded.capital,
+      capitalAfter: settled.bucket,
       capital: settled.bucket,
     });
 
@@ -264,8 +302,12 @@ class DryRunExecutor {
       mode: "DRY_RUN",
       pnl,
       startAsset: guarded.startAsset,
+      startAmount: guarded.startAmount,
       outputAmount: simulated.outputAmount,
       profitRate: simulated.profitRate,
+      legResults: simulated.legs,
+      capitalBefore: guarded.capital,
+      capitalAfter: settled.bucket,
       events: this.events.slice(),
     };
   }

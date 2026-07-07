@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
+  maxTotalForQuoteAsset,
   minTotalForQuoteAsset,
   normalizeLimitPrice,
   orderTotal,
@@ -8,12 +9,16 @@ const {
   priceUnitForMarket,
   hasCompleteMarketPolicy,
   validateOrderMinimum,
+  validateOrderTotal,
 } = require("../src/exchanges/upbit/marketPolicy");
 
 test("Upbit market policy resolves documented KRW/BTC/USDT fallback minimum totals", () => {
   assert.equal(minTotalForQuoteAsset("KRW"), 5000);
   assert.equal(minTotalForQuoteAsset("BTC"), 0.00005);
   assert.equal(minTotalForQuoteAsset("USDT"), 0.5);
+  assert.equal(maxTotalForQuoteAsset("KRW"), 1000000000);
+  assert.equal(maxTotalForQuoteAsset("BTC"), 10);
+  assert.equal(maxTotalForQuoteAsset("USDT"), 1000000);
 });
 
 test("Upbit market policy resolves documented price units by quote market", () => {
@@ -40,17 +45,19 @@ test("Upbit market policy normalizes limit prices without crossing observed best
   assert.equal(ask.priceWasRounded, true);
 });
 
-test("orders/chance minimum totals override fallback market minimums", () => {
+test("orders/chance order totals override fallback market limits", () => {
   const policy = policyForMarket("KRW-BTC", {
     market: {
       id: "KRW-BTC",
-      bid: { min_total: "10000" },
-      ask: { min_total: "7000" },
+      bid: { min_total: "10000", max_total: "900000" },
+      ask: { min_total: "7000", max_total: "800000" },
     },
   });
 
   assert.equal(policy.bid.minTotal, 10000);
+  assert.equal(policy.bid.maxTotal, 900000);
   assert.equal(policy.ask.minTotal, 7000);
+  assert.equal(policy.ask.maxTotal, 800000);
   assert.equal(hasCompleteMarketPolicy(policy), true);
   assert.equal(hasCompleteMarketPolicy({ ...policy, ask: {} }), true);
   assert.equal(hasCompleteMarketPolicy({ ...policy, quoteAsset: "UNKNOWN", bid: {}, ask: {}, minTotal: null }), false);
@@ -71,6 +78,15 @@ test("market policy validates order totals before submission", () => {
     ok: false,
     total: 1000,
     minTotal: 5000,
+    maxTotal: 1000000000,
     rejectionReason: "MIN_ORDER_TOTAL",
+  });
+
+  assert.deepEqual(validateOrderTotal({ ...order, price: "100000000", volume: "11" }, policy), {
+    ok: false,
+    total: 1100000000,
+    minTotal: 5000,
+    maxTotal: 1000000000,
+    rejectionReason: "MAX_ORDER_TOTAL",
   });
 });

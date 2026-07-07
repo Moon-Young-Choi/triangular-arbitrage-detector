@@ -11,6 +11,7 @@ const { TimingTrace, perfNowNs } = require("../core/timingTrace");
 const { executionLogMode } = require("../execution/executionPlan");
 const { createStrategyRegistry } = require("../strategies/registry");
 const { validateDepthAwareCandidate } = require("./candidateValidator");
+const { policyForMarket } = require("../exchanges/upbit/marketPolicy");
 const {
   ObservationOrderbookStore,
   ValidationOrderbookStore,
@@ -18,7 +19,6 @@ const {
 const { RuntimeMetrics } = require("./metrics");
 const {
   computeFeeMetrics,
-  classifyOpportunity,
   buildStableCycleLayout,
   getCycleFreshness,
   calculateLatencyBreakdown,
@@ -163,10 +163,28 @@ function markerColorFor(direction, status, isActuallyProfitable) {
   return "#2d6f9f";
 }
 
+function opportunityClassForNetProfit(netProfitRate, status = "available", direction = "canonical") {
+  if (status !== "available" || netProfitRate === null || netProfitRate === undefined) {
+    return "unavailable";
+  }
+
+  if (netProfitRate > 0) {
+    return direction === "reverse" ? "reverse-profit" : "canonical-profit";
+  }
+
+  return "neutral";
+}
+
 function normalizeFeePolicyMap(source) {
   if (!source) return new Map();
   if (source instanceof Map) return new Map(source);
   return new Map(Object.entries(source));
+}
+
+function normalizeMarketPolicyMap(source) {
+  if (!source) return new Map();
+  const entries = source instanceof Map ? [...source.entries()] : Object.entries(source);
+  return new Map(entries.map(([market, policy]) => [market, policyForMarket(market, policy)]));
 }
 
 function compactCycleForDelta(row) {
@@ -365,6 +383,7 @@ class LiveTriangleState {
       activeStrategyId: this.activeStrategy.id,
     });
     this.feePolicyByMarket = normalizeFeePolicyMap(options.feePolicyByMarket);
+    this.marketPolicyByMarket = normalizeMarketPolicyMap(options.marketPolicyByMarket);
     this.eventLog = [];
     this.logStore = options.logStore || null;
     this.executionHandler = options.executionHandler || null;
@@ -416,6 +435,10 @@ class LiveTriangleState {
 
   setFeePolicyByMarket(feePolicyByMarket) {
     this.feePolicyByMarket = normalizeFeePolicyMap(feePolicyByMarket);
+  }
+
+  setMarketPolicyByMarket(marketPolicyByMarket) {
+    this.marketPolicyByMarket = normalizeMarketPolicyMap(marketPolicyByMarket);
   }
 
   setExecutionHandler(handler) {
@@ -1025,6 +1048,9 @@ class LiveTriangleState {
       runtimeConfig: this.runtimeConfig,
       feeRate: this.feeRate,
       feePolicyByMarket: this.feePolicyByMarket,
+      marketPolicyByMarket: this.marketPolicyByMarket,
+      useDefaultFeePolicy: true,
+      maxDepthLevels: 1,
       staleOrderbookMs: this.staleOrderbookMs,
       engineState: this.engineState,
       depthValidation: {
@@ -1116,6 +1142,8 @@ class LiveTriangleState {
     });
     const netResult = calculateCycleMultiplier(cycle, null, calculationOrderbooks, this.feeRate, {
       nowMs: calculatedAtEpochMs,
+      feePolicyByMarket: this.feePolicyByMarket,
+      useDefaultFeePolicy: true,
     });
     const calculationEndPerfMs = performance.now();
     const calcDonePerfNs = perfNowNs();
@@ -1131,8 +1159,8 @@ class LiveTriangleState {
     const grossProfitRate = grossMultiplier === null ? null : grossMultiplier - 1;
     const netProfitRate = netMultiplier === null ? null : netMultiplier - 1;
     const isActuallyProfitable = status === "available" &&
-      grossMultiplier !== null &&
-      grossMultiplier > feeMetrics.executableBreakEvenGross;
+      netProfitRate !== null &&
+      netProfitRate > 0;
     const latency = calculateLatencyBreakdown({
       ...(options.timings || {}),
       calculationStartPerfMs,
@@ -1145,7 +1173,11 @@ class LiveTriangleState {
     const marketDataGuards = this.runtimeConfig.executionPolicy.marketDataGuards || {};
     const depthValidation = validateDepthAwareCandidate(cycle, validationOrderbooks, {
       feeRate: this.feeRate,
+      useDefaultFeePolicy: true,
       feePolicyByMarket: this.feePolicyByMarket,
+      marketPolicyByMarket: this.marketPolicyByMarket,
+      maxDepthLevels: 1,
+      validateOrderTotals: true,
       nowMs: calculatedAtEpochMs,
       staleOrderbookMs: this.staleOrderbookMs,
       observationOrderbooks: calculationOrderbooks,
@@ -1186,10 +1218,11 @@ class LiveTriangleState {
       grossProfitRate,
       netProfitRate,
       feeRate: this.feeRate,
+      useDefaultFeePolicy: true,
       executableBreakEvenGross: feeMetrics.executableBreakEvenGross,
       isActuallyProfitable,
       status,
-      opportunityClass: classifyOpportunity(grossMultiplier, this.feeRate, status, cycle.direction),
+      opportunityClass: opportunityClassForNetProfit(netProfitRate, status, cycle.direction),
       staleReason: status === "stale" ? unavailableReason : null,
       unavailableReason: status === "unavailable" ? unavailableReason : null,
       validationStatus: depthValidation.validationStatus,

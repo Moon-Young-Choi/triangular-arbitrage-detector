@@ -8,6 +8,8 @@ const {
 } = require("../src/exchanges/upbit/exchangeRestClient");
 const {
   normalizeFeePolicy,
+  defaultFeePolicyForMarket,
+  defaultTakerFeeRateForMarket,
   resolveLegFee,
   hasCompleteFeePolicy,
   isFeePolicyExpired,
@@ -277,6 +279,18 @@ test("orders chance and fee policy normalization supports taker and maker fees",
   );
   assert.equal(marketCodeFromChance({ market: { market: "BTC-ETH" } }), "BTC-ETH");
   assert.equal(marketCodeFromChance({ marketId: "KRW-ETH" }), "KRW-ETH");
+});
+
+test("default Upbit taker fee policy follows quote market guide", () => {
+  assert.equal(defaultTakerFeeRateForMarket("KRW-BTC"), 0.0005);
+  assert.equal(defaultTakerFeeRateForMarket("BTC-ETH"), 0.0025);
+  assert.equal(defaultTakerFeeRateForMarket("USDT-SOL"), 0.0025);
+
+  const policy = defaultFeePolicyForMarket("USDT-SOL");
+
+  assert.equal(policy.bidFee, 0.0025);
+  assert.equal(policy.askFee, 0.0025);
+  assert.equal(policy.source, "upbit-default");
 });
 
 test("myOrder events normalize order and fee fields", () => {

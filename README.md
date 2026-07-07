@@ -55,7 +55,7 @@ The scanner loads all Upbit markets dynamically, finds unique 3-asset triangles,
 - `out/upbit-canonical-cycle-multipliers.csv`
 - `out/upbit-canonical-cycle-multipliers.html`
 
-By default, `netMultiplier` equals `grossMultiplier` because no fee is assumed. To include a taker fee:
+The read-only scanner keeps `netMultiplier` equal to `grossMultiplier` unless you provide a scalar taker fee:
 
 ```bash
 UPBIT_TAKER_FEE_RATE=0.0005 npm run triangles
@@ -77,10 +77,12 @@ The CLI accepts structured slash commands only. It does not interpret natural-la
 ```text
 qg> /status
 qg> /start dry
+qg> /start dry --follow
 qg> /market
 qg> /desk --start KRW --top 20
 qg> /opportunity show #1
 qg> /execution
+qg> /contracts --mode DRY_RUN --follow
 qg> /strategy list
 qg> /config draft set candidateValidation.minNetProfitRate 0.0002
 qg> /config draft diff
@@ -99,6 +101,7 @@ npm run cli -- /strategy active
 npm run cli -- /desk --format csv --start KRW
 npm run cli -- /latency
 npm run cli -- /balances
+npm run cli -- /contracts --mode REAL --limit 5
 npm run cli -- /logs --kind errors
 npm run cli -- /dryrun report --format csv
 ```
@@ -127,7 +130,7 @@ Authenticated Upbit REST and private MyOrder WebSocket foundations are present. 
 
 The private MyOrder WebSocket authenticates with a JWT bearer header, subscribes to `myOrder`, normalizes fill and fee fields, sends periodic ping heartbeats, and reconnects after unexpected closes while retaining close code/reason status metadata for readiness and CLI diagnostics.
 
-Fee and market policy planning are market and side aware. Upbit `orders/chance` responses are normalized into `bidFee`, `askFee`, `makerBidFee`, `makerAskFee`, `source`, `loadedAt`, and `expiresAt` fee policies plus market policies with bid/ask minimum totals. During private cache refresh, the engine loads policies for the required triangle markets, injects fees into live depth validation, preserves them on execution plans, and passes cached market policies into real execution leg checks. Cache counts/errors are exposed in `privateCacheStatus`. Depth validation, execution plans, and dry-run fills can consume `feePolicyByMarket` or a `resolveLegFee` callback; each simulated leg records the resolved `feeSide` and `feeRate`. The scalar `UPBIT_TAKER_FEE_RATE` path remains a scanner and fallback input, not the real-run fee evidence source.
+Fee and market policy planning are market and side aware. Upbit `orders/chance` responses are normalized into `bidFee`, `askFee`, `makerBidFee`, `makerAskFee`, `source`, `loadedAt`, and `expiresAt` fee policies plus market policies with bid/ask minimum totals. During private cache refresh, the engine loads policies for the required triangle markets, injects fees into live depth validation, preserves them on execution plans, and passes cached market/fee policies into real execution leg checks. Cache counts/errors are exposed in `privateCacheStatus`. If an authenticated fee policy is missing, live/replay execution paths fall back to Upbit general-order taker defaults by quote market: KRW `0.05%`, BTC `0.25%`, USDT `0.25%`. Buy legs reserve the fee from the input quote budget (`notional = input / (1 + feeRate)`), while sell legs subtract the fee from gross quote proceeds. Depth validation, execution plans, and dry-run fills can consume `feePolicyByMarket` or a `resolveLegFee` callback; each simulated leg records the resolved `feeSide`, `feeRate`, `feeAmount`, and `feeAsset`. The scalar `UPBIT_TAKER_FEE_RATE` path remains a scanner and explicit fallback input, not the real-run fee evidence source.
 
 Strategies implement a common contract: `evaluate`, `rank`, `buildExecutionPlan`, and `explain`. Execution candidates are queued only through the active strategy's `buildExecutionPlan`; a top-of-book strategy decision alone cannot bypass rejected depth validation. Strategy decisions and plans carry both `strategyId` and `strategyVersion` for replay and audit comparison.
 
@@ -139,7 +142,7 @@ Real-run guardrails track realized PnL by start asset and trading day, expose da
 
 Latency is split into market-data, decision, execution, and display/client domains. Market-data and decision latency feed strategy/risk decisions, execution latency is checked against `executionPolicy.executionGuards.maxOrderAckMs` and `maxReconciliationMs`, and display/client latency is informational only. If an intermediate leg exceeds the execution latency budget, the cycle stops with a residual asset instead of submitting the next leg.
 
-`/logs` can filter append-only logs by mode, type, start asset, strategy, cycle, and period. `/dryrun report` exposes a dry-run report summary and JSON/CSV export, including complete rate, depth/latency rejection rates, expected-vs-simulated PnL gap, review period, and start-asset/strategy/route/market-state/latency/best-touch breakdowns. `/readiness` shows the real-run readiness score and start-asset evidence. `/execution` separates latest real-run orders/fills from dry-run logs and shows guard/cache/readiness status, locked balances, residual assets, and real-run PnL by start asset.
+`/contracts` renders executed dry-run and real-run cycles as contract summaries with contract size, asset trend, triangle, route, canonical/reverse direction, per-leg fill prices, fees, slippage, and touch ratio. Profit/loss numbers are colored in TTY output; use `--color always`, `--color never`, or `--no-color` to override. `/start dry --follow` and `/start real-guarded --follow` queue Start once, then follow only newly executed contract summaries. `/logs` can filter append-only logs by mode, type, start asset, strategy, cycle, and period. `/dryrun report` exposes a dry-run report summary and JSON/CSV export, including complete rate, depth/latency rejection rates, expected-vs-simulated PnL gap, review period, and start-asset/strategy/route/market-state/latency/best-touch breakdowns. `/readiness` shows the real-run readiness score and start-asset evidence. `/execution` separates latest real-run orders/fills from dry-run logs and shows guard/cache/readiness status, locked balances, residual assets, contract details, and real-run PnL by start asset.
 
 Replay support can regenerate dry-run execution plans and the same dry-run review report summary from a saved orderbook tape without touching the exchange:
 

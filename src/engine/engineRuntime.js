@@ -80,7 +80,9 @@ function marketPolicyMapToObject(marketPolicyByMarket) {
       quoteAsset: policy.quoteAsset,
       baseAsset: policy.baseAsset,
       bidMinTotal: policy.bid && policy.bid.minTotal,
+      bidMaxTotal: policy.bid && policy.bid.maxTotal,
       askMinTotal: policy.ask && policy.ask.minTotal,
+      askMaxTotal: policy.ask && policy.ask.maxTotal,
       minTotal: policy.minTotal,
       maxTotal: policy.maxTotal,
       priceUnit: policy.priceUnit,
@@ -234,6 +236,10 @@ class EngineRuntime {
 
     if (this.feePolicyByMarket.size > 0 && typeof this.state.setFeePolicyByMarket === "function") {
       this.state.setFeePolicyByMarket(this.feePolicyByMarket);
+    }
+
+    if (this.marketPolicyByMarket.size > 0 && typeof this.state.setMarketPolicyByMarket === "function") {
+      this.state.setMarketPolicyByMarket(this.marketPolicyByMarket);
     }
 
     this.state.setExecutionHandler((plan, metadata) => this.handleExecutionCandidate(plan, metadata));
@@ -806,6 +812,10 @@ class EngineRuntime {
       this.state.setFeePolicyByMarket(this.feePolicyByMarket);
     }
 
+    if (typeof this.state.setMarketPolicyByMarket === "function") {
+      this.state.setMarketPolicyByMarket(this.marketPolicyByMarket);
+    }
+
     if (markets.length > 0 && this.feePolicyLoadErrors.length === 0) {
       this.orderChanceCacheUpdatedAt = loadedAtMs;
     }
@@ -1022,6 +1032,7 @@ class EngineRuntime {
         getGuardContext: () => this.currentGuardContext(),
         getValidationOrderbooks: () => this.state.getValidationOrderbooks(),
         getMarketPolicy: (market) => this.marketPolicyByMarket.get(market) || null,
+        getFeePolicy: (market) => this.feePolicyByMarket.get(market) || null,
       });
 
       if (result && result.ok) {

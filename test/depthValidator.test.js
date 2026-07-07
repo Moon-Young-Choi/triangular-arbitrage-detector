@@ -59,11 +59,56 @@ test("depth simulator buys and sells across orderbook levels with fee-adjusted o
   ]), 1.5, 0.001);
 
   assert.equal(buy.available, true);
-  assert.equal(Number(buy.outputAmount.toFixed(12)), 1.4985);
+  assert.equal(Number(buy.outputAmount.toFixed(12)), 1.498592316774);
+  assert.equal(Number(buy.feeAmount.toFixed(12)), 0.154845154845);
+  assert.equal(buy.feeAsset, "quote");
   assert.equal(sell.available, true);
   assert.equal(Number(sell.outputAmount.toFixed(12)), 129.87);
   assert.equal(buy.bestLevelTouchRatio, 1);
   assert.equal(sell.bestLevelTouchRatio, 1);
+});
+
+test("depth simulation can be constrained to the first orderbook level for current IOC execution", () => {
+  const constrained = simulateCycleWithDepth(cycle, new Map([
+    ["KRW-BTC", orderbook("KRW-BTC", [
+      { ask_price: 100, bid_price: 99, ask_size: 1, bid_size: 100 },
+      { ask_price: 101, bid_price: 98, ask_size: 100, bid_size: 100 },
+    ])],
+    ["BTC-ETH", orderbook("BTC-ETH", [{ ask_price: 0.1, bid_price: 0.09, ask_size: 100, bid_size: 100 }])],
+    ["KRW-ETH", orderbook("KRW-ETH", [{ ask_price: 21, bid_price: 20, ask_size: 100, bid_size: 100 }])],
+  ]), 150, 0, {
+    maxDepthLevels: 1,
+  });
+  const unconstrained = simulateCycleWithDepth(cycle, new Map([
+    ["KRW-BTC", orderbook("KRW-BTC", [
+      { ask_price: 100, bid_price: 99, ask_size: 1, bid_size: 100 },
+      { ask_price: 101, bid_price: 98, ask_size: 100, bid_size: 100 },
+    ])],
+    ["BTC-ETH", orderbook("BTC-ETH", [{ ask_price: 0.1, bid_price: 0.09, ask_size: 100, bid_size: 100 }])],
+    ["KRW-ETH", orderbook("KRW-ETH", [{ ask_price: 21, bid_price: 20, ask_size: 100, bid_size: 100 }])],
+  ]), 150, 0);
+
+  assert.equal(constrained.available, false);
+  assert.equal(constrained.rejectionCode, REJECTION_REASONS.DEPTH_INSUFFICIENT);
+  assert.equal(constrained.limitingMarket, "KRW-BTC");
+  assert.equal(unconstrained.available, true);
+});
+
+test("depth simulation can reject order totals outside Upbit market policy", () => {
+  const simulated = simulateCycleWithDepth(cycle, liquidOrderbooks(), 100, 0, {
+    nowMs: 1000,
+    maxDepthLevels: 1,
+    validateOrderTotals: true,
+    marketPolicyByMarket: new Map([
+      ["KRW-BTC", { bid: { minTotal: 0, maxTotal: 50 }, ask: { minTotal: 0, maxTotal: 50 } }],
+    ]),
+  });
+
+  assert.equal(simulated.available, false);
+  assert.equal(simulated.rejectionCode, REJECTION_REASONS.MAX_ORDER_TOTAL);
+  assert.equal(simulated.limitingMarket, "KRW-BTC");
+  assert.equal(simulated.legs[0].orderTotal, 100);
+  assert.equal(simulated.legs[0].maxOrderTotal, 50);
 });
 
 test("liquidity policy merges validation config and calculates limiting best-level use", () => {
@@ -89,6 +134,7 @@ test("liquidity policy merges validation config and calculates limiting best-lev
   ];
 
   assert.equal(config.minOrderAmountByAsset.KRW, 5000);
+  assert.equal(config.minOrderAmountByAsset.USDT, 0.5);
   assert.equal(config.maxTouchRatioPerBestLevel, 0.25);
   assert.equal(limitingLegFor(legs, config).market, "BTC-ETH");
   assert.equal(maxExecutableStartAmount(10000, legs, config.maxTouchRatioPerBestLevel), 5000);
@@ -175,10 +221,25 @@ test("depth simulation and candidate validation use market and side specific fee
   });
 
   assert.equal(simulated.available, true);
-  assert.equal(Number(simulated.outputAmount.toFixed(6)), 188.2188);
+  assert.equal(Number(simulated.outputAmount.toFixed(6)), 188.312949);
   assert.deepEqual(simulated.legs.map((leg) => leg.feeSide), ["bid", "bid", "ask"]);
   assert.deepEqual(simulated.legs.map((leg) => leg.feeRate), [0.01, 0.02, 0.03]);
+  assert.deepEqual(simulated.legs.map((leg) => leg.feeAsset), ["KRW", "BTC", "KRW"]);
   assert.equal(validation.depthLegs[2].feeRate, 0.03);
+});
+
+test("depth simulation can apply Upbit default taker fees by quote market", () => {
+  const simulated = simulateCycleWithDepth(cycle, liquidOrderbooks(), 100, 0, {
+    nowMs: 1000,
+    useDefaultFeePolicy: true,
+  });
+
+  assert.equal(simulated.available, true);
+  assert.deepEqual(simulated.legs.map((leg) => leg.feeRate), [0.0005, 0.0025, 0.0005]);
+  assert.deepEqual(simulated.legs.map((leg) => leg.feeAsset), ["KRW", "BTC", "KRW"]);
+  assert.equal(Number(simulated.outputAmount.toFixed(6)), 199.301845);
+  assert.equal(Number(simulated.feeSummary.totalByAsset.KRW.toFixed(6)), 0.149676);
+  assert.equal(Number(simulated.feeSummary.totalByAsset.BTC.toFixed(12)), 0.002492519326);
 });
 
 test("candidate validation rejects observation and validation snapshot gap", () => {

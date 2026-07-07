@@ -1,4 +1,5 @@
 const { parseMarket } = require("../lib/marketGraph");
+const { resolveLegFeeRate } = require("../lib/depthSimulator");
 const { DEFAULT_EXECUTION_MODE, BEST_IOC_EXECUTION_MODE } = require("./executionModes");
 const {
   DEFAULT_PARTIAL_FILL_POLICY,
@@ -14,7 +15,7 @@ const {
   loadMarketPolicy,
   normalizeLimitPrice,
   policyForMarket,
-  validateOrderMinimum,
+  validateOrderTotal,
 } = require("../exchanges/upbit/marketPolicy");
 
 function firstUnit(orderbook) {
@@ -62,7 +63,9 @@ function marketPolicyMeta(policy) {
     quoteAsset: policy && policy.quoteAsset,
     baseAsset: policy && policy.baseAsset,
     bidMinTotal: policy && policy.bid && policy.bid.minTotal,
+    bidMaxTotal: policy && policy.bid && policy.bid.maxTotal,
     askMinTotal: policy && policy.ask && policy.ask.minTotal,
+    askMaxTotal: policy && policy.ask && policy.ask.maxTotal,
     priceUnit: policy && policy.priceUnit,
     source: policy && policy.source,
     state: policy && policy.state,
@@ -133,17 +136,61 @@ function liquidityCap({ requestedInputAmount, requestedVolume, bestLevelSize, pr
   };
 }
 
+function feeRateFromContext(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed >= 1) return 0;
+  return parsed;
+}
+
+function legFeeSide(step) {
+  const { quote, base } = parseMarket(step.market);
+
+  if (step.fromAsset === quote && step.toAsset === base) return "bid";
+  if (step.fromAsset === base && step.toAsset === quote) return "ask";
+  return null;
+}
+
 function summarizeFees(legResults = []) {
   return legResults.reduce((summary, leg) => {
     summary.totalPaidFee += Number(leg.paidFee || 0);
     summary.totalTradeFee += Number(leg.tradeFee || 0);
     summary.legs += 1;
+    const asset = leg.feeAsset || null;
+    const paidFee = Number(leg.paidFee);
+    const tradeFee = Number(leg.tradeFee);
+
+    if (asset) {
+      if (Number.isFinite(paidFee)) {
+        summary.totalPaidFeeByAsset[asset] = (summary.totalPaidFeeByAsset[asset] || 0) + paidFee;
+        summary.totalByAsset[asset] = (summary.totalByAsset[asset] || 0) + paidFee;
+      }
+
+      if (Number.isFinite(tradeFee)) {
+        summary.totalTradeFeeByAsset[asset] = (summary.totalTradeFeeByAsset[asset] || 0) + tradeFee;
+      }
+    }
+
     return summary;
   }, {
     totalPaidFee: 0,
     totalTradeFee: 0,
+    totalByAsset: {},
+    totalPaidFeeByAsset: {},
+    totalTradeFeeByAsset: {},
     legs: 0,
   });
+}
+
+function cycleExecutionMeta(cycle = {}) {
+  return {
+    routeVariantId: cycle.routeVariantId,
+    triangleId: cycle.triangleId,
+    direction: cycle.direction,
+    directionLabel: cycle.directionLabel,
+    route: Array.isArray(cycle.route) ? cycle.route.slice() : null,
+    routeLabel: cycle.routeLabel,
+    markets: Array.isArray(cycle.markets) ? cycle.markets.slice() : null,
+  };
 }
 
 class RealExecutor {
@@ -173,6 +220,7 @@ class RealExecutor {
       runtimeConfig: this.runtimeConfig,
     });
     this.marketPolicyProvider = options.marketPolicyProvider || null;
+    this.feePolicyProvider = options.feePolicyProvider || null;
     this.activeEngineState = null;
   }
 
@@ -248,11 +296,13 @@ class RealExecutor {
     return {
       planId: plan.planId,
       cycleId: plan.cycle && plan.cycle.cycleId,
+      routeVariantId: plan.routeVariantId || (plan.cycle && plan.cycle.routeVariantId),
       startAsset: plan.startAsset || (plan.cycle && plan.cycle.startAsset),
       strategyId: plan.strategyId,
       engineState: plan.engineState || this.activeEngineState || this.runtimeConfig.engineState || null,
       marketState: plan.marketState || plan.status,
       opportunityClass: plan.opportunityClass,
+      ...cycleExecutionMeta(plan.cycle),
     };
   }
 
@@ -319,23 +369,56 @@ class RealExecutor {
     return loadMarketPolicy(this.restClient, step.market);
   }
 
-  buildOrderForLeg(step, amount, orderbook, identifier, marketPolicy = null, liquidityPolicyOverride = null) {
+  async feePolicyForLeg(step, context = {}) {
+    if (typeof context.getFeePolicy === "function") {
+      return context.getFeePolicy(step.market);
+    }
+
+    if (typeof this.feePolicyProvider === "function") {
+      return this.feePolicyProvider(step.market);
+    }
+
+    return null;
+  }
+
+  resolveFeeRateForLeg(step, plan = {}, feePolicy = null) {
+    const side = legFeeSide(step);
+    const feePolicyByMarket = feePolicy
+      ? new Map([[step.market, feePolicy]])
+      : plan.feePolicyByMarket;
+
+    return resolveLegFeeRate(step, side, plan.feeRate || 0, {
+      feePolicyByMarket,
+      useDefaultFeePolicy: plan.useDefaultFeePolicy === true,
+      expectedMaker: plan.expectedMaker === true,
+      orderType: plan.orderType || "limit",
+      timeInForce: plan.timeInForce || "ioc",
+    });
+  }
+
+  buildOrderForLeg(step, amount, orderbook, identifier, marketPolicy = null, liquidityPolicyOverride = null, feeContext = {}) {
     const mode = this.runtimeConfig.executionMode || DEFAULT_EXECUTION_MODE;
     const { quote, base } = parseMarket(step.market);
     const unit = firstUnit(orderbook);
     const liquidityPolicy = resolveLiquidityPolicy(this.runtimeConfig, liquidityPolicyOverride || {});
+    const feeRate = feeRateFromContext(feeContext.feeRate);
 
     if (step.fromAsset === quote && step.toAsset === base) {
+      const tradeBudget = feeRate > 0 ? Number(amount) / (1 + feeRate) : Number(amount);
+
       if (mode === BEST_IOC_EXECUTION_MODE) {
         const cap = liquidityCap({
-          requestedInputAmount: amount,
-          requestedVolume: amount / unit.askPrice,
+          requestedInputAmount: tradeBudget,
+          requestedVolume: tradeBudget / unit.askPrice,
           bestLevelSize: unit.askSize,
           price: unit.askPrice,
           inputAsset: "quote",
           policy: liquidityPolicy,
         });
         const cappedQuote = cap.submittedInputAmount;
+        const expectedFeeAmount = cappedQuote * feeRate;
+        const submittedAllInInputAmount = cappedQuote + expectedFeeAmount;
+        const unsubmittedInputAmount = Math.max(0, Number(amount) - submittedAllInInputAmount);
         return {
           market: step.market,
           side: "bid",
@@ -346,14 +429,20 @@ class RealExecutor {
           observedBestPrice: unit.askPrice,
           expectedOutputAmount: cappedQuote / unit.askPrice,
           requestedInputAmount: amount,
+          requestedTradeInputAmount: tradeBudget,
           submittedInputAmount: cap.submittedInputAmount,
-          unsubmittedInputAmount: cap.unsubmittedInputAmount,
+          submittedAllInInputAmount,
+          unsubmittedInputAmount,
+          feeRate,
+          expectedFeeAmount,
+          expectedFeeAsset: quote,
+          feeAsset: quote,
           bestLevelSize: cap.bestLevelSize,
           bestLevelTouchRatio: cap.bestLevelTouchRatio,
           maxBestLevelTouchRatio: cap.maxBestLevelTouchRatio,
           minBestLevelResidualRatio: cap.minBestLevelResidualRatio,
           effectiveBestLevelTouchRatio: cap.effectiveBestLevelTouchRatio,
-          liquidityCapped: cap.liquidityCapped,
+          liquidityCapped: unsubmittedInputAmount > Math.max(Number(amount) * 1e-12, 1e-12),
         };
       }
       const normalized = normalizeLimitPrice({
@@ -363,14 +452,17 @@ class RealExecutor {
         priceUnit: marketPolicy && marketPolicy.priceUnit,
       });
       const cap = liquidityCap({
-        requestedInputAmount: amount,
-        requestedVolume: amount / normalized.numericPrice,
+        requestedInputAmount: tradeBudget,
+        requestedVolume: tradeBudget / normalized.numericPrice,
         bestLevelSize: unit.askSize,
         price: normalized.numericPrice,
         inputAsset: "quote",
         policy: liquidityPolicy,
       });
       const cappedBase = cap.submittedVolume;
+      const expectedFeeAmount = cap.submittedInputAmount * feeRate;
+      const submittedAllInInputAmount = cap.submittedInputAmount + expectedFeeAmount;
+      const unsubmittedInputAmount = Math.max(0, Number(amount) - submittedAllInInputAmount);
 
       return {
         market: step.market,
@@ -385,14 +477,20 @@ class RealExecutor {
         priceWasRounded: normalized.priceWasRounded,
         expectedOutputAmount: cappedBase,
         requestedInputAmount: amount,
+        requestedTradeInputAmount: tradeBudget,
         submittedInputAmount: cap.submittedInputAmount,
-        unsubmittedInputAmount: cap.unsubmittedInputAmount,
+        submittedAllInInputAmount,
+        unsubmittedInputAmount,
+        feeRate,
+        expectedFeeAmount,
+        expectedFeeAsset: quote,
+        feeAsset: quote,
         bestLevelSize: cap.bestLevelSize,
         bestLevelTouchRatio: cap.bestLevelTouchRatio,
         maxBestLevelTouchRatio: cap.maxBestLevelTouchRatio,
         minBestLevelResidualRatio: cap.minBestLevelResidualRatio,
         effectiveBestLevelTouchRatio: cap.effectiveBestLevelTouchRatio,
-        liquidityCapped: cap.liquidityCapped,
+        liquidityCapped: unsubmittedInputAmount > Math.max(Number(amount) * 1e-12, 1e-12),
       };
     }
 
@@ -413,6 +511,8 @@ class RealExecutor {
         policy: liquidityPolicy,
       });
       const cappedBase = cap.submittedVolume;
+      const expectedGrossOutputAmount = cappedBase * executionPrice;
+      const expectedFeeAmount = expectedGrossOutputAmount * feeRate;
 
       return {
         market: step.market,
@@ -425,10 +525,15 @@ class RealExecutor {
         observedBestPrice: unit.bidPrice,
         priceUnit: normalized && normalized.priceUnit,
         priceWasRounded: normalized ? normalized.priceWasRounded : false,
-        expectedOutputAmount: cappedBase * executionPrice,
+        expectedOutputAmount: expectedGrossOutputAmount - expectedFeeAmount,
+        expectedGrossOutputAmount,
         requestedInputAmount: amount,
         submittedInputAmount: cap.submittedInputAmount,
         unsubmittedInputAmount: cap.unsubmittedInputAmount,
+        feeRate,
+        expectedFeeAmount,
+        expectedFeeAsset: quote,
+        feeAsset: quote,
         bestLevelSize: cap.bestLevelSize,
         bestLevelTouchRatio: cap.bestLevelTouchRatio,
         maxBestLevelTouchRatio: cap.maxBestLevelTouchRatio,
@@ -487,6 +592,7 @@ class RealExecutor {
         remainingVolume,
         paidFee,
         tradeFee,
+        feeAsset: quote,
         unsubmittedInputAmount,
       };
     }
@@ -503,26 +609,39 @@ class RealExecutor {
     if (step.fromAsset === quote && step.toAsset === base) {
       return {
         ok: true,
-        amount: Math.max(0, executedVolume - paidFee),
+        amount: executedVolume,
         executedVolume,
         requestedVolume,
         remainingVolume,
         avgPrice,
         paidFee,
         tradeFee,
+        feeAsset: quote,
+        feeAmount: paidFee,
+        grossOutputAmount: executedVolume,
+        netOutputAmount: executedVolume,
+        tradeAmount: executedVolume * avgPrice,
         ...residual,
       };
     }
 
+    const grossOutputAmount = executedVolume * avgPrice;
+    const netOutputAmount = Math.max(0, grossOutputAmount - paidFee);
+
     return {
       ok: true,
-      amount: Math.max(0, executedVolume * avgPrice - paidFee),
+      amount: netOutputAmount,
       executedVolume,
       requestedVolume,
       remainingVolume,
       avgPrice,
       paidFee,
       tradeFee,
+      feeAsset: quote,
+      feeAmount: paidFee,
+      grossOutputAmount,
+      netOutputAmount,
+      tradeAmount: grossOutputAmount,
       ...residual,
     };
   }
@@ -700,25 +819,31 @@ class RealExecutor {
           emergencyStop: failure.emergencyStop,
         };
       }
-      const order = this.buildOrderForLeg(step, amount, orderbook, identifier, marketPolicy);
-      const minimum = validateOrderMinimum(order, marketPolicy);
+      const feePolicy = await this.feePolicyForLeg(step, context);
+      const feeRate = this.resolveFeeRateForLeg(step, plan, feePolicy);
+      const order = this.buildOrderForLeg(step, amount, orderbook, identifier, marketPolicy, null, {
+        feeRate,
+      });
+      const orderTotalCheck = validateOrderTotal(order, marketPolicy);
 
-      if (!minimum.ok) {
-        const failure = this.riskGuard.recordFailure(minimum.rejectionReason);
+      if (!orderTotalCheck.ok) {
+        const failure = this.riskGuard.recordFailure(orderTotalCheck.rejectionReason);
         this.emitState(plan, `LEG_${legIndex}_FAILED`, {
           legIndex,
           market: step.market,
-          reason: minimum.rejectionReason,
-          orderTotal: minimum.total,
-          minTotal: minimum.minTotal,
+          reason: orderTotalCheck.rejectionReason,
+          orderTotal: orderTotalCheck.total,
+          minTotal: orderTotalCheck.minTotal,
+          maxTotal: orderTotalCheck.maxTotal,
         });
         this.emitState(plan, step.index > 0 ? "CYCLE_RESIDUAL" : "CYCLE_ABORTED", {
           legIndex,
-          reason: minimum.rejectionReason,
+          reason: orderTotalCheck.rejectionReason,
           residualAsset: step.fromAsset,
           actualAmount: amount,
-          orderTotal: minimum.total,
-          minTotal: minimum.minTotal,
+          orderTotal: orderTotalCheck.total,
+          minTotal: orderTotalCheck.minTotal,
+          maxTotal: orderTotalCheck.maxTotal,
           emergencyStop: failure.emergencyStop,
         });
         this.emit("orders", {
@@ -729,31 +854,35 @@ class RealExecutor {
           strategyId: plan.strategyId,
           legIndex,
           market: step.market,
-          rejectionReason: minimum.rejectionReason,
-          orderTotal: minimum.total,
-          minTotal: minimum.minTotal,
+          rejectionReason: orderTotalCheck.rejectionReason,
+          orderTotal: orderTotalCheck.total,
+          minTotal: orderTotalCheck.minTotal,
+          maxTotal: orderTotalCheck.maxTotal,
           order,
           marketPolicy: marketPolicyMeta(marketPolicy),
+          feePolicy,
           emergencyStop: failure.emergencyStop,
         });
         this.emitCycleAborted(plan, {
           legIndex,
           market: step.market,
-          reason: minimum.rejectionReason,
-          rejectionReason: minimum.rejectionReason,
+          reason: orderTotalCheck.rejectionReason,
+          rejectionReason: orderTotalCheck.rejectionReason,
           residualAsset: step.fromAsset,
           actualAmount: amount,
-          orderTotal: minimum.total,
-          minTotal: minimum.minTotal,
+          orderTotal: orderTotalCheck.total,
+          minTotal: orderTotalCheck.minTotal,
+          maxTotal: orderTotalCheck.maxTotal,
           emergencyStop: failure.emergencyStop,
         });
         return {
           ok: false,
-          reason: minimum.rejectionReason,
+          reason: orderTotalCheck.rejectionReason,
           residualAsset: step.fromAsset,
           actualAmount: amount,
-          orderTotal: minimum.total,
-          minTotal: minimum.minTotal,
+          orderTotal: orderTotalCheck.total,
+          minTotal: orderTotalCheck.minTotal,
+          maxTotal: orderTotalCheck.maxTotal,
           legResults,
           feeSummary: summarizeFees(legResults),
           emergencyStop: failure.emergencyStop,
@@ -788,6 +917,7 @@ class RealExecutor {
         legIndex,
         order,
         marketPolicy: marketPolicyMeta(marketPolicy),
+        feePolicy,
       });
 
       this.riskGuard.recordOrderOpened();
@@ -957,8 +1087,16 @@ class RealExecutor {
         requestedVolume: fill.requestedVolume,
         remainingVolume: fill.remainingVolume,
         avgPrice: fill.avgPrice,
+        submittedPrice: order.price,
+        observedBestPrice: order.observedBestPrice,
         paidFee: fill.paidFee,
         tradeFee: fill.tradeFee,
+        feeRate: order.feeRate,
+        feeAmount: fill.feeAmount,
+        feeAsset: fill.feeAsset,
+        tradeAmount: fill.tradeAmount,
+        grossOutputAmount: fill.grossOutputAmount,
+        netOutputAmount: fill.netOutputAmount,
         isPartial: fill.isPartial,
         isLiquidityCapped: fill.isLiquidityCapped,
         hasResidual: fill.hasResidual,
@@ -1020,6 +1158,12 @@ class RealExecutor {
         avgPrice: fill.avgPrice,
         paidFee: fill.paidFee,
         tradeFee: fill.tradeFee,
+        feeRate: order.feeRate,
+        feeAmount: fill.feeAmount,
+        feeAsset: fill.feeAsset,
+        tradeAmount: fill.tradeAmount,
+        grossOutputAmount: fill.grossOutputAmount,
+        netOutputAmount: fill.netOutputAmount,
         outputAmount: amount,
         isPartial: fill.isPartial,
         isLiquidityCapped: fill.isLiquidityCapped,
@@ -1146,6 +1290,7 @@ class RealExecutor {
       feeSummary,
     });
     this.emitCycleDone(plan, {
+      startAmount: Number(plan.startAmount),
       outputAmount: amount,
       pnl,
       feeSummary,

@@ -1,4 +1,13 @@
+const { parseMarket } = require("../../lib/marketGraph");
+
+const DEFAULT_TAKER_FEE_BY_QUOTE_ASSET = Object.freeze({
+  KRW: 0.0005,
+  BTC: 0.0025,
+  USDT: 0.0025,
+});
+
 function numberOrNull(value) {
+  if (value === null || value === undefined || value === "") return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -31,6 +40,27 @@ function normalizeFeePolicy(chance) {
     loadedAt: chance.loadedAt || null,
     expiresAt: chance.expiresAt || null,
     raw: chance.raw || chance,
+  };
+}
+
+function defaultTakerFeeRateForMarket(market) {
+  const quoteAsset = parseMarket(market).quote;
+  return DEFAULT_TAKER_FEE_BY_QUOTE_ASSET[quoteAsset] ?? 0;
+}
+
+function defaultFeePolicyForMarket(market) {
+  const fee = defaultTakerFeeRateForMarket(market);
+
+  return {
+    market,
+    bidFee: fee,
+    askFee: fee,
+    makerBidFee: fee,
+    makerAskFee: fee,
+    source: "upbit-default",
+    loadedAt: null,
+    expiresAt: null,
+    raw: null,
   };
 }
 
@@ -75,7 +105,10 @@ function calculateFeeAdjustedBreakEven(fees) {
 }
 
 module.exports = {
+  DEFAULT_TAKER_FEE_BY_QUOTE_ASSET,
   normalizeFeePolicy,
+  defaultFeePolicyForMarket,
+  defaultTakerFeeRateForMarket,
   loadFeePolicyForMarket,
   resolveLegFee,
   hasCompleteFeePolicy,

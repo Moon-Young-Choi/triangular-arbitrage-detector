@@ -7,7 +7,7 @@ const DEFAULT_VALIDATION_CONFIG = Object.freeze({
   minOrderAmountByAsset: Object.freeze({
     KRW: 5000,
     BTC: 0.00005,
-    USDT: 5,
+    USDT: 0.5,
   }),
   maxTouchRatioPerBestLevel: 0.3,
   minResidualRatioPerBestLevel: 0.1,

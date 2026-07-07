@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { CommandInbox } = require("../src/core/commandInbox");
 const { CommandStatusStore } = require("../src/core/commandStatusStore");
+const { AppendOnlyLogStore } = require("../src/core/appendOnlyLog");
 const { DEFAULT_RUNTIME_CONFIG } = require("../src/core/runtimeConfig");
 const { createCliContext, filterNewLogs, runOnce } = require("../src/cli/commandRegistry");
 const { parseSlashCommand } = require("../src/cli/commandParser");
@@ -451,4 +452,96 @@ test("CLI system subcommands and exchange view render without browser services",
   assert.match(files.output, /System Files/);
   assert.match(files.output, /Command inbox/);
   assert.match(latency.output, /display\s+affectsTrading\s+no/);
+});
+
+test("CLI contracts renders executed dry-run contract details with optional colors", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-cli-contracts-"));
+  const logDir = path.join(dir, "logs");
+  const logStore = new AppendOnlyLogStore({ logDir });
+
+  await logStore.append("events", {
+    type: "cycle.done",
+    mode: "DRY_RUN",
+    engineState: "RUNNING",
+    timestamp: "2026-07-06T12:00:00.000Z",
+    planId: "plan-contract-1",
+    cycleId: "BTC|ETH|KRW:canonical:KRW",
+    routeVariantId: "BTC|ETH|KRW:canonical:KRW",
+    triangleId: "BTC|ETH|KRW",
+    direction: "canonical",
+    directionLabel: "정방향",
+    route: ["KRW", "BTC", "ETH", "KRW"],
+    markets: ["KRW-BTC", "BTC-ETH", "KRW-ETH"],
+    startAsset: "KRW",
+    strategyId: "depthAwareLimitIoc",
+    startAmount: 10000,
+    outputAmount: 10015,
+    pnl: 15,
+    profitRate: 0.0015,
+    expectedNetProfit: 20,
+    expectedSimulatedGap: 5,
+    capitalBefore: { availableBalance: 20000, reservedBalance: 0, lockedBalance: 0, residualBalance: 0 },
+    capitalAfter: { availableBalance: 20015, reservedBalance: 0, lockedBalance: 0, residualBalance: 0 },
+    legResults: [
+      {
+        legIndex: 1,
+        market: "KRW-BTC",
+        side: "bid",
+        fromAsset: "KRW",
+        toAsset: "BTC",
+        inputAmount: 10000,
+        outputAmount: 0.25,
+        averagePrice: 40000,
+        feeRate: 0.0005,
+        expectedSlippageBps: 0,
+        bestLevelTouchRatio: 0.2,
+      },
+      {
+        legIndex: 2,
+        market: "BTC-ETH",
+        side: "bid",
+        fromAsset: "BTC",
+        toAsset: "ETH",
+        inputAmount: 0.25,
+        outputAmount: 4,
+        averagePrice: 0.0625,
+        feeRate: 0.0005,
+        expectedSlippageBps: 0.1,
+        bestLevelTouchRatio: 0.1,
+      },
+      {
+        legIndex: 3,
+        market: "KRW-ETH",
+        side: "ask",
+        fromAsset: "ETH",
+        toAsset: "KRW",
+        inputAmount: 4,
+        outputAmount: 10015,
+        averagePrice: 2503.75,
+        feeRate: 0.0005,
+        expectedSlippageBps: 0.2,
+        bestLevelTouchRatio: 0.05,
+      },
+    ],
+  });
+
+  const context = createCliContext({
+    runtimeDir: dir,
+    logDir,
+    output: memoryOutput(),
+  });
+
+  const contracts = await runOnce(parseSlashCommand("/contracts --mode dry --limit 5"), context);
+  const executionContracts = await runOnce(parseSlashCommand("/execution contracts --mode DRY_RUN"), context);
+  const colored = await runOnce(parseSlashCommand("/contracts --mode DRY_RUN --color always"), context);
+
+  assert.match(contracts.output, /Contracts/);
+  assert.match(contracts.output, /BTC\|ETH\|KRW/);
+  assert.match(contracts.output, /정방향/);
+  assert.match(contracts.output, /KRW -> BTC -> ETH -> KRW/);
+  assert.match(contracts.output, /Contract size\s+10000\.00 KRW/);
+  assert.match(contracts.output, /\+15 KRW/);
+  assert.match(contracts.output, /KRW-BTC/);
+  assert.match(executionContracts.output, /Asset trend/);
+  assert.match(colored.output, /\x1b\[32m\+15\x1b\[0m KRW/);
 });

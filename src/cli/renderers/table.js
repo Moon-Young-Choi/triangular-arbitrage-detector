@@ -7,21 +7,34 @@ function stringifyCell(value) {
   return String(value);
 }
 
+function stripAnsi(value) {
+  return String(value).replace(/\x1b\[[0-9;]*m/gu, "");
+}
+
+function visibleLength(value) {
+  return stripAnsi(value).length;
+}
+
+function padVisible(value, width) {
+  const text = stringifyCell(value);
+  return `${text}${" ".repeat(Math.max(0, width - visibleLength(text)))}`;
+}
+
 function renderKeyValues(rows = []) {
   const normalized = rows.map(([key, value]) => [stringifyCell(key), stringifyCell(value)]);
-  const width = normalized.reduce((max, [key]) => Math.max(max, key.length), 0);
+  const width = normalized.reduce((max, [key]) => Math.max(max, visibleLength(key)), 0);
 
-  return normalized.map(([key, value]) => `${key.padEnd(width)}  ${value}`).join("\n");
+  return normalized.map(([key, value]) => `${padVisible(key, width)}  ${value}`).join("\n");
 }
 
 function renderTable(headers = [], rows = []) {
   const stringRows = rows.map((row) => row.map(stringifyCell));
   const widths = headers.map((header, index) => {
     const values = stringRows.map((row) => row[index] || "");
-    return Math.max(String(header).length, ...values.map((value) => value.length));
+    return Math.max(visibleLength(header), ...values.map(visibleLength));
   });
   const renderRow = (row) => row
-    .map((cell, index) => stringifyCell(cell).padEnd(widths[index]))
+    .map((cell, index) => padVisible(cell, widths[index]))
     .join("  ")
     .trimEnd();
   const divider = widths.map((width) => "-".repeat(width)).join("  ");
@@ -36,5 +49,6 @@ function renderTable(headers = [], rows = []) {
 module.exports = {
   renderKeyValues,
   renderTable,
+  stripAnsi,
   stringifyCell,
 };

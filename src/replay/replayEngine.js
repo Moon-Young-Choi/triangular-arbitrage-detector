@@ -92,19 +92,27 @@ function oldestLegAgeMs(timestamps, nowMs) {
 function replayCycle(cycle, options = {}) {
   const runtimeConfig = options.runtimeConfig || {};
   const feeRate = Number(options.feeRate || 0);
+  const marketPolicyByMarket = options.marketPolicyByMarket || runtimeConfig.marketPolicyByMarket || null;
   const nowMs = Number(options.nowMs ?? Date.now());
   const staleOrderbookMs = Number(options.staleOrderbookMs || 3000);
   const validationOrderbooks = latestOrderbooksAt(options.tape || [], nowMs, {
     markets: cycle.markets || (cycle.steps || []).map((step) => step.market),
   });
   const grossResult = calculateCycleMultiplier(cycle, null, validationOrderbooks, 0, { nowMs });
-  const netResult = calculateCycleMultiplier(cycle, null, validationOrderbooks, feeRate, { nowMs });
+  const netResult = calculateCycleMultiplier(cycle, null, validationOrderbooks, feeRate, {
+    nowMs,
+    useDefaultFeePolicy: true,
+  });
   const grossMultiplier = grossResult.available ? grossResult.multiplier : null;
   const netMultiplier = netResult.available ? netResult.multiplier : null;
   const timestamps = legTimestamps(cycle, validationOrderbooks);
   const marketDataGuards = (runtimeConfig.executionPolicy && runtimeConfig.executionPolicy.marketDataGuards) || {};
   const depthValidation = validateDepthAwareCandidate(cycle, validationOrderbooks, {
     feeRate,
+    useDefaultFeePolicy: true,
+    maxDepthLevels: 1,
+    validateOrderTotals: true,
+    marketPolicyByMarket,
     nowMs,
     staleOrderbookMs,
     config: {
@@ -181,6 +189,9 @@ function replayCycle(cycle, options = {}) {
       validationOrderbooks,
       runtimeConfig,
       feeRate,
+      marketPolicyByMarket,
+      useDefaultFeePolicy: true,
+      maxDepthLevels: 1,
       staleOrderbookMs,
       engineState: options.engineState || "RUNNING",
       nowMs,

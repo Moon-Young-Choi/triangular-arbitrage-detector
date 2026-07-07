@@ -43,6 +43,12 @@ function tape() {
   ];
 }
 
+const marketPolicyByMarket = {
+  "KRW-BTC": { bid: { minTotal: 0, maxTotal: 1000000000 }, ask: { minTotal: 0, maxTotal: 1000000000 } },
+  "BTC-ETH": { bid: { minTotal: 0, maxTotal: 1000 }, ask: { minTotal: 0, maxTotal: 1000 } },
+  "KRW-ETH": { bid: { minTotal: 0, maxTotal: 1000000000 }, ask: { minTotal: 0, maxTotal: 1000000000 } },
+};
+
 function runtimeConfig(overrides = {}) {
   return {
     runMode: "DRY_RUN",
@@ -67,6 +73,7 @@ function runtimeConfig(overrides = {}) {
       minNetProfitRate: 0,
       ...(overrides.candidateValidation || {}),
     },
+    marketPolicyByMarket,
   };
 }
 

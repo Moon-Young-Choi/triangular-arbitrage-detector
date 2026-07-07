@@ -6,6 +6,12 @@ const MIN_TOTAL_BY_QUOTE_ASSET = {
   USDT: 0.5,
 };
 
+const MAX_TOTAL_BY_QUOTE_ASSET = {
+  KRW: 1000000000,
+  BTC: 10,
+  USDT: 1000000,
+};
+
 const KRW_PRICE_UNITS = [
   { min: 2000000, unit: 1000 },
   { min: 1000000, unit: 1000 },
@@ -134,6 +140,10 @@ function minTotalForQuoteAsset(quoteAsset) {
   return MIN_TOTAL_BY_QUOTE_ASSET[String(quoteAsset || "").toUpperCase()] || null;
 }
 
+function maxTotalForQuoteAsset(quoteAsset) {
+  return MAX_TOTAL_BY_QUOTE_ASSET[String(quoteAsset || "").toUpperCase()] || null;
+}
+
 function minTotalFromChanceMarket(chanceMarket = {}, side) {
   const sideMin = side === "ask"
     ? chanceMarket.ask && chanceMarket.ask.minTotal
@@ -154,24 +164,30 @@ function normalizeMarketPolicy(input = {}) {
     ? input.market.id
     : input.id || raw.market && raw.market.id || raw.market;
   const parsed = market ? parseMarket(market) : { quote: input.quoteAsset || input.quote, base: input.baseAsset || input.base };
-  const chanceMarket = input.market || raw.market || {};
+  const chanceMarket = input.market && typeof input.market === "object"
+    ? input.market
+    : raw.market && typeof raw.market === "object"
+      ? raw.market
+      : {};
+  const bidPolicy = input.bid || raw.bid || chanceMarket.bid || {};
+  const askPolicy = input.ask || raw.ask || chanceMarket.ask || {};
 
   return {
     market,
     quoteAsset: parsed.quote,
     baseAsset: parsed.base,
     bid: {
-      minTotal: minTotalFromChanceMarket(chanceMarket, "bid"),
-      maxTotal: numberOrNull(chanceMarket.bid && (chanceMarket.bid.maxTotal ?? chanceMarket.bid.max_total)),
+      minTotal: numberOrNull(bidPolicy.minTotal ?? bidPolicy.min_total) ?? minTotalFromChanceMarket(chanceMarket, "bid"),
+      maxTotal: numberOrNull(bidPolicy.maxTotal ?? bidPolicy.max_total),
     },
     ask: {
-      minTotal: minTotalFromChanceMarket(chanceMarket, "ask"),
-      maxTotal: numberOrNull(chanceMarket.ask && (chanceMarket.ask.maxTotal ?? chanceMarket.ask.max_total)),
+      minTotal: numberOrNull(askPolicy.minTotal ?? askPolicy.min_total) ?? minTotalFromChanceMarket(chanceMarket, "ask"),
+      maxTotal: numberOrNull(askPolicy.maxTotal ?? askPolicy.max_total),
     },
-    minTotal: numberOrNull(chanceMarket.minTotal ?? chanceMarket.min_total),
-    maxTotal: numberOrNull(chanceMarket.maxTotal ?? chanceMarket.max_total),
+    minTotal: numberOrNull(input.minTotal ?? input.min_total ?? chanceMarket.minTotal ?? chanceMarket.min_total),
+    maxTotal: numberOrNull(input.maxTotal ?? input.max_total ?? chanceMarket.maxTotal ?? chanceMarket.max_total),
     priceUnit: numberOrNull(input.priceUnit ?? chanceMarket.priceUnit ?? chanceMarket.price_unit),
-    state: chanceMarket.state,
+    state: input.state ?? chanceMarket.state,
     source: input.source || (input.raw ? "orders/chance" : "fallback"),
     raw,
   };
@@ -193,6 +209,7 @@ function policyForMarket(market, input = null) {
     raw: null,
   };
   const fallbackMinTotal = minTotalForQuoteAsset(parsed.quote);
+  const fallbackMaxTotal = maxTotalForQuoteAsset(parsed.quote);
 
   return {
     ...normalized,
@@ -202,10 +219,12 @@ function policyForMarket(market, input = null) {
     bid: {
       ...(normalized.bid || {}),
       minTotal: numberOrNull(normalized.bid && normalized.bid.minTotal) ?? numberOrNull(normalized.minTotal) ?? fallbackMinTotal,
+      maxTotal: numberOrNull(normalized.bid && normalized.bid.maxTotal) ?? numberOrNull(normalized.maxTotal) ?? fallbackMaxTotal,
     },
     ask: {
       ...(normalized.ask || {}),
       minTotal: numberOrNull(normalized.ask && normalized.ask.minTotal) ?? numberOrNull(normalized.minTotal) ?? fallbackMinTotal,
+      maxTotal: numberOrNull(normalized.ask && normalized.ask.maxTotal) ?? numberOrNull(normalized.maxTotal) ?? fallbackMaxTotal,
     },
   };
 }
@@ -226,6 +245,14 @@ function minimumTotalForOrder(policy, side) {
     minTotalForQuoteAsset(policy.quoteAsset);
 }
 
+function maximumTotalForOrder(policy, side) {
+  if (!policy) return null;
+  const sidePolicy = side === "ask" ? policy.ask : policy.bid;
+  return numberOrNull(sidePolicy && sidePolicy.maxTotal) ??
+    numberOrNull(policy.maxTotal) ??
+    maxTotalForQuoteAsset(policy.quoteAsset);
+}
+
 function orderTotal(order) {
   if (!order) return null;
 
@@ -239,46 +266,79 @@ function orderTotal(order) {
   return volume * price;
 }
 
-function validateOrderMinimum(order, policy) {
+function validateOrderTotal(order, policy) {
   const minTotal = minimumTotalForOrder(policy, order && order.side);
+  const maxTotal = maximumTotalForOrder(policy, order && order.side);
   const total = orderTotal(order);
 
-  if (minTotal === null || total === null) {
+  if (total === null) {
     return {
       ok: true,
       total,
       minTotal,
+      maxTotal,
+    };
+  }
+
+  if (minTotal !== null && total + 1e-12 < minTotal) {
+    return {
+      ok: false,
+      total,
+      minTotal,
+      maxTotal,
+      rejectionReason: "MIN_ORDER_TOTAL",
+    };
+  }
+
+  if (maxTotal !== null && total - 1e-12 > maxTotal) {
+    return {
+      ok: false,
+      total,
+      minTotal,
+      maxTotal,
+      rejectionReason: "MAX_ORDER_TOTAL",
     };
   }
 
   return {
-    ok: total + 1e-12 >= minTotal,
+    ok: true,
     total,
     minTotal,
-    rejectionReason: "MIN_ORDER_TOTAL",
+    maxTotal,
+    rejectionReason: null,
   };
+}
+
+function validateOrderMinimum(order, policy) {
+  return validateOrderTotal(order, policy);
 }
 
 function hasCompleteMarketPolicy(policy) {
   return Boolean(
     policy &&
     finiteNumber(minimumTotalForOrder(policy, "bid")) &&
-    finiteNumber(minimumTotalForOrder(policy, "ask")),
+    finiteNumber(minimumTotalForOrder(policy, "ask")) &&
+    finiteNumber(maximumTotalForOrder(policy, "bid")) &&
+    finiteNumber(maximumTotalForOrder(policy, "ask")),
   );
 }
 
 module.exports = {
   MIN_TOTAL_BY_QUOTE_ASSET,
+  MAX_TOTAL_BY_QUOTE_ASSET,
   priceUnitForQuoteAsset,
   priceUnitForMarket,
   normalizeLimitPrice,
   roundPriceToUnit,
   minTotalForQuoteAsset,
+  maxTotalForQuoteAsset,
   normalizeMarketPolicy,
   policyForMarket,
   loadMarketPolicy,
   minimumTotalForOrder,
+  maximumTotalForOrder,
   orderTotal,
+  validateOrderTotal,
   validateOrderMinimum,
   hasCompleteMarketPolicy,
 };

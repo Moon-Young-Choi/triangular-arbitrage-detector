@@ -2,7 +2,7 @@ const { COMMANDS } = require("./commandRegistry");
 
 const START_ASSETS = ["KRW", "BTC", "USDT"];
 const LOG_KINDS = ["events", "decisions", "orders", "fills", "errors"];
-const RUN_MODES = ["OBSERVE", "DRY_RUN", "REAL_GUARDED"];
+const RUN_MODES = ["OBSERVE", "DRY_RUN", "REAL", "REAL_GUARDED"];
 const OUTPUT_FORMATS = ["json", "csv", "txt"];
 const STRATEGY_IDS = ["topOfBookBaseline", "depthAwareLimitIoc"];
 
@@ -31,6 +31,11 @@ const COMMAND_COMPLETIONS = {
       entry("dry", "Run simulated executions without real orders"),
       entry("real-guarded", "Request real trading after readiness checks"),
     ]],
+    options: [
+      entry("--follow", "Follow executed contract details after Start"),
+      entry("--limit", "Maximum contract rows to read while following"),
+      entry("--color", "always or never"),
+    ],
   },
   "/market": {
     argsByPosition: [[
@@ -67,12 +72,35 @@ const COMMAND_COMPLETIONS = {
   },
   "/execution": {
     argsByPosition: [[
+      entry("contracts", "Show executed contract details"),
       entry("orders", "Show latest orders"),
       entry("fills", "Show latest fills"),
       entry("pnl", "Show real-run PnL summary"),
       entry("residuals", "Show residual assets"),
       entry("guards", "Show execution guard state"),
     ]],
+  },
+  "/contracts": {
+    options: [
+      entry("--follow", "Follow new executed contracts"),
+      entry("--limit", "Maximum rows to read"),
+      entry("--mode", "DRY_RUN or REAL"),
+      entry("--start", "Filter by start asset"),
+      entry("--strategy", "Filter by strategy id"),
+      entry("--cycle", "Filter by cycle id"),
+      entry("--sinceMs", "Lookback window in milliseconds"),
+      entry("--from", "Start timestamp"),
+      entry("--to", "End timestamp"),
+      entry("--color", "always or never"),
+      entry("--no-color", "Disable ANSI colors"),
+    ],
+    optionValues: {
+      mode: RUN_MODES.map((mode) => entry(mode, "Run mode")),
+      start: START_ASSETS.map((asset) => entry(asset, "Start asset")),
+      strategy: STRATEGY_IDS.map((strategy) => entry(strategy, "Strategy id")),
+      limit: [entry("10", "Compact history"), entry("50", "Follow buffer")],
+      color: [entry("always", "Force ANSI colors"), entry("never", "Disable ANSI colors")],
+    },
   },
   "/logs": {
     options: [

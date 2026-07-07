@@ -38,6 +38,26 @@ function sanitizeForLog(value) {
   );
 }
 
+function parseNdjsonLines(lines = [], options = {}) {
+  const rows = [];
+
+  lines.forEach((line, index) => {
+    try {
+      rows.push(JSON.parse(line));
+    } catch (error) {
+      if (typeof options.onMalformedLine === "function") {
+        options.onMalformedLine({
+          index,
+          line,
+          message: error.message,
+        });
+      }
+    }
+  });
+
+  return rows;
+}
+
 class AppendOnlyLogStore {
   constructor(options = {}) {
     this.logDir = options.logDir || path.resolve(process.cwd(), "out", "logs");
@@ -114,7 +134,9 @@ class AppendOnlyLogStore {
         .filter(Boolean);
       const completeLines = position > 0 ? lines.slice(1) : lines;
 
-      return completeLines.slice(-limit).map((line) => JSON.parse(line));
+      return parseNdjsonLines(completeLines.slice(-limit), {
+        onMalformedLine: options.onMalformedLine,
+      });
     } catch (error) {
       if (error.code === "ENOENT") {
         return [];
@@ -151,6 +173,7 @@ module.exports = {
   AUDIT_COMMON_KEYS,
   auditPayload,
   buildAuditRecord,
+  parseNdjsonLines,
   resolveTraceId,
   sanitizeForLog,
 };

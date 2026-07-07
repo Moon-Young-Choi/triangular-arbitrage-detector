@@ -48,6 +48,12 @@ function profitableTape() {
   ];
 }
 
+const marketPolicyByMarket = {
+  "KRW-BTC": { bid: { minTotal: 0, maxTotal: 1000000000 }, ask: { minTotal: 0, maxTotal: 1000000000 } },
+  "BTC-ETH": { bid: { minTotal: 0, maxTotal: 1000 }, ask: { minTotal: 0, maxTotal: 1000 } },
+  "KRW-ETH": { bid: { minTotal: 0, maxTotal: 1000000000 }, ask: { minTotal: 0, maxTotal: 1000000000 } },
+};
+
 const runtimeConfig = {
   runMode: "DRY_RUN",
   executionMode: "LIMIT_IOC_AT_OBSERVED_BEST",
@@ -60,6 +66,7 @@ const runtimeConfig = {
     minResidualAbsoluteByAsset: { KRW: 0, BTC: 0, ETH: 0 },
     minNetProfitRate: 0,
   },
+  marketPolicyByMarket,
 };
 
 test("orderbook tape keeps deterministic latest snapshots by replay time", () => {

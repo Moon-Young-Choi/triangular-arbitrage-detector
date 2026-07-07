@@ -1,4 +1,5 @@
 const { parseMarket } = require("./marketGraph");
+const { resolveLegFeeRate } = require("./depthSimulator");
 
 function getBestOrderbookUnit(orderbook) {
   const unit = orderbook && Array.isArray(orderbook.orderbook_units) && orderbook.orderbook_units[0];
@@ -39,24 +40,38 @@ function convertAmountDetailed(
 
   const { quote, base } = parseMarket(marketCode);
   const unit = getBestOrderbookUnit(orderbook);
-  const feeMultiplier = 1 - feeRate;
   const timestamp = getOrderbookTimestamp(orderbook);
   const nowMs = options.nowMs || Date.now();
   let action;
   let usedSide;
   let usedPrice;
+  let feeSide;
+  let feeAmount;
+  let feeAsset;
+  let tradeAmount;
+  let grossOutputAmount;
   let outputAmount;
 
   if (fromAsset === quote && toAsset === base) {
     action = "BUY_BASE_WITH_QUOTE";
     usedSide = "ask";
+    feeSide = "bid";
     usedPrice = Number(unit.ask_price);
-    outputAmount = amount / usedPrice * feeMultiplier;
+    tradeAmount = feeRate > 0 ? amount / (1 + feeRate) : amount;
+    feeAmount = tradeAmount * feeRate;
+    feeAsset = quote;
+    grossOutputAmount = tradeAmount / usedPrice;
+    outputAmount = grossOutputAmount;
   } else if (fromAsset === base && toAsset === quote) {
     action = "SELL_BASE_FOR_QUOTE";
     usedSide = "bid";
+    feeSide = "ask";
     usedPrice = Number(unit.bid_price);
-    outputAmount = amount * usedPrice * feeMultiplier;
+    tradeAmount = amount * usedPrice;
+    feeAmount = tradeAmount * feeRate;
+    feeAsset = quote;
+    grossOutputAmount = tradeAmount;
+    outputAmount = tradeAmount - feeAmount;
   } else {
     throw new Error(`Market ${marketCode} cannot convert ${fromAsset} -> ${toAsset}`);
   }
@@ -72,6 +87,10 @@ function convertAmountDetailed(
       base,
       action,
       usedSide,
+      feeSide,
+      feeRate,
+      feeAmount,
+      feeAsset,
       usedPrice,
       askPrice: Number(unit.ask_price),
       bidPrice: Number(unit.bid_price),
@@ -79,6 +98,9 @@ function convertAmountDetailed(
       bidSize: Number(unit.bid_size),
       inputAmount: amount,
       outputAmount,
+      tradeAmount,
+      grossOutputAmount,
+      netOutputAmount: outputAmount,
       orderbookTimestampMs: timestamp,
       orderbookAgeMs: timestamp === null ? null : Math.max(0, nowMs - timestamp),
       streamType: orderbook.streamType || orderbook.stream_type || null,
@@ -110,13 +132,22 @@ function calculateCycleMultiplier(cycle, pairMap, orderbooks, feeRate = 0, optio
       }
 
       const amountIn = amount;
+      const { quote, base } = parseMarket(step.market);
+      let feeSide;
+
+      if (step.fromAsset === quote && step.toAsset === base) {
+        feeSide = "bid";
+      } else if (step.fromAsset === base && step.toAsset === quote) {
+        feeSide = "ask";
+      }
+
       const converted = convertAmountDetailed(
         amount,
         step.fromAsset,
         step.toAsset,
         step.market,
         orderbook,
-        feeRate,
+        resolveLegFeeRate(step, feeSide, feeRate, options),
         {
           legIndex: step.index + 1,
           nowMs: options.nowMs,

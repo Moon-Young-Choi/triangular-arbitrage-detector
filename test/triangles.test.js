@@ -109,7 +109,10 @@ test("QUOTE -> BASE conversion buys at best ask", () => {
     orderbook_units: [{ ask_price: 100, bid_price: 90 }],
   };
 
-  assert.equal(convertAmount(1000, "KRW", "BTC", "KRW-BTC", orderbook, 0.001), 9.99);
+  assert.equal(
+    Number(convertAmount(1000, "KRW", "BTC", "KRW-BTC", orderbook, 0.001).toFixed(12)),
+    9.99000999001,
+  );
 });
 
 test("BASE -> QUOTE conversion sells at best bid", () => {

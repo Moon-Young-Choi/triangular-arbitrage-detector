@@ -361,8 +361,12 @@ function validateDepthAwareCandidate(cycle, orderbooks, options = {}) {
   const simulated = simulateCycleWithDepth(cycle, orderbooks, startAmount, options.feeRate || 0, {
     nowMs: options.nowMs,
     staleOrderbookMs: options.staleOrderbookMs,
+    maxDepthLevels: options.maxDepthLevels,
+    validateOrderTotals: options.validateOrderTotals === true,
     feePolicyByMarket: options.feePolicyByMarket,
+    marketPolicyByMarket: options.marketPolicyByMarket,
     resolveLegFee: options.resolveLegFee,
+    useDefaultFeePolicy: options.useDefaultFeePolicy === true,
     expectedMaker: options.expectedMaker === true,
     orderType: options.orderType || "limit",
     timeInForce: options.timeInForce || "ioc",

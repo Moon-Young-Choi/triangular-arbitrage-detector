@@ -189,6 +189,8 @@ test("real executor writes schema-complete audit events through append-only log"
 
   assert.equal(result.ok, true);
   assert.equal(cycleDone.auditSchema.ok, true);
+  assert.equal(cycleDone.startAmount, 100);
+  assert.equal(cycleDone.legResults.length, 2);
   assert.equal(orderSubmitted.auditSchema.ok, true);
   assert.equal(orderAck.auditSchema.ok, true);
   assert.equal(fill.auditSchema.ok, true);
@@ -542,6 +544,27 @@ test("real executor caps orders to configured best-level touch ratio", () => {
   assert.equal(sell.unsubmittedInputAmount, 7.5);
 });
 
+test("real executor keeps bid order notional inside all-in fee budget", () => {
+  const executor = new RealExecutor({
+    liveTradingEnabled: true,
+    runtimeConfig: {
+      executionMode: "LIMIT_IOC_AT_OBSERVED_BEST",
+      executionPolicy: {},
+    },
+    restClient: {},
+  });
+  const buy = executor.buildOrderForLeg(cycle.steps[0], 100, orderbook(), "id-fee", null, null, {
+    feeRate: 0.0005,
+  });
+
+  assert.equal(buy.side, "bid");
+  assert.equal(buy.volume, "0.999500249875");
+  assert.equal(Number(buy.submittedInputAmount.toFixed(12)), 99.950024987506);
+  assert.equal(Number(buy.expectedFeeAmount.toFixed(12)), 0.049975012494);
+  assert.equal(Number(buy.submittedAllInInputAmount.toFixed(12)), 100);
+  assert.equal(buy.expectedFeeAsset, "KRW");
+});
+
 test("real executor rejects orders below market minimum total before submission", async () => {
   const submitted = [];
   const events = [];
@@ -583,6 +606,59 @@ test("real executor rejects orders below market minimum total before submission"
   assert.equal(submitted.length, 0);
   assert.equal(events.some((event) => event.type === "order.rejected" && event.rejectionReason === "MIN_ORDER_TOTAL"), true);
   assert.equal(events.some((event) => event.type === "cycle.aborted" && event.reason === "MIN_ORDER_TOTAL"), true);
+});
+
+test("real executor rejects orders above market maximum total before submission", async () => {
+  const submitted = [];
+  const events = [];
+  const executor = new RealExecutor({
+    liveTradingEnabled: true,
+    logStore: memoryLogStore(events),
+    runtimeConfig: {
+      executionMode: "LIMIT_IOC_AT_OBSERVED_BEST",
+      candidateValidation: { minOrderAmountByAsset: { BTC: 0, KRW: 0 } },
+      executionPolicy: {
+        realRunLimits: {},
+        marketDataGuards: {},
+        executionGuards: {},
+      },
+    },
+    restClient: {
+      async createOrder(order) {
+        submitted.push(order);
+        return { uuid: "unexpected", ...order };
+      },
+    },
+  });
+
+  const result = await executor.execute({
+    planId: "real-max-total",
+    cycle,
+    startAmount: 100,
+    validationOrderbooks: new Map([["KRW-BTC", orderbook()]]),
+  }, {
+    privateWsConnected: true,
+    orderChanceFresh: true,
+    accountBalanceFresh: true,
+    validationDepthFresh: true,
+    getMarketPolicy() {
+      return {
+        market: {
+          id: "KRW-BTC",
+          bid: { min_total: "0", max_total: "50" },
+          ask: { min_total: "0", max_total: "50" },
+        },
+      };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "MAX_ORDER_TOTAL");
+  assert.equal(result.orderTotal, 100);
+  assert.equal(result.maxTotal, 50);
+  assert.equal(submitted.length, 0);
+  assert.equal(events.some((event) => event.type === "order.rejected" && event.rejectionReason === "MAX_ORDER_TOTAL"), true);
+  assert.equal(events.some((event) => event.type === "cycle.aborted" && event.reason === "MAX_ORDER_TOTAL"), true);
 });
 
 test("real executor reprices each leg from latest validation orderbooks", async () => {
@@ -840,9 +916,12 @@ test("real executor returns leg fill summaries and fee totals", async () => {
   assert.equal(result.legResults.length, 2);
   assert.equal(result.legResults[0].paidFee, 0.01);
   assert.equal(result.legResults[0].tradeFee, 0.011);
+  assert.equal(result.legResults[0].outputAmount, 1);
+  assert.equal(result.legResults[0].feeAsset, "KRW");
   assert.equal(result.feeSummary.legs, 2);
   assert.equal(result.feeSummary.totalPaidFee, 1.01);
   assert.equal(result.feeSummary.totalTradeFee.toFixed(3), "1.111");
+  assert.equal(result.feeSummary.totalByAsset.KRW, 1.01);
 });
 
 test("real executor stops before next leg when execution latency exceeds budget", async () => {

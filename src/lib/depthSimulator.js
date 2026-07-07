@@ -1,8 +1,17 @@
 const { parseMarket } = require("./marketGraph");
 const { REJECTION_REASONS } = require("../core/rejectionReasons");
+const { defaultFeePolicyForMarket } = require("../exchanges/upbit/feeModel");
+const {
+  policyForMarket: normalizeMarketPolicyForMarket,
+  validateOrderTotal,
+} = require("../exchanges/upbit/marketPolicy");
 
-function normalizeUnits(orderbook) {
-  return (orderbook && Array.isArray(orderbook.orderbook_units) ? orderbook.orderbook_units : [])
+function normalizeUnits(orderbook, options = {}) {
+  const maxDepthLevels = Number(options.maxDepthLevels || 0);
+  const rawUnits = orderbook && Array.isArray(orderbook.orderbook_units) ? orderbook.orderbook_units : [];
+  const units = maxDepthLevels > 0 ? rawUnits.slice(0, maxDepthLevels) : rawUnits;
+
+  return units
     .map((unit) => ({
       askPrice: Number(unit.ask_price ?? unit.askPrice),
       bidPrice: Number(unit.bid_price ?? unit.bidPrice),
@@ -27,18 +36,19 @@ function insufficientDepth(partial = {}) {
   };
 }
 
-function simulateBuyWithQuote(orderbook, quoteAmount, feeRate = 0) {
+function simulateBuyWithQuote(orderbook, quoteAmount, feeRate = 0, options = {}) {
   if (!(quoteAmount >= 0)) {
     throw new Error(`Invalid quote amount: ${quoteAmount}`);
   }
 
-  const units = normalizeUnits(orderbook);
+  const units = normalizeUnits(orderbook, options);
 
   if (units.length === 0) {
     return insufficientDepth({ residualInputAmount: quoteAmount });
   }
 
-  let remainingQuote = quoteAmount;
+  const tradeBudget = feeRate > 0 ? quoteAmount / (1 + feeRate) : quoteAmount;
+  let remainingQuote = tradeBudget;
   let grossBase = 0;
   let quoteSpent = 0;
   let bestLevelQuoteSpent = 0;
@@ -59,11 +69,15 @@ function simulateBuyWithQuote(orderbook, quoteAmount, feeRate = 0) {
     }
   }
 
-  if (remainingQuote > Math.max(quoteAmount * 1e-12, 1e-12)) {
+  if (remainingQuote > Math.max(tradeBudget * 1e-12, 1e-12)) {
+    const feeAmount = quoteSpent * feeRate;
     return insufficientDepth({
       inputAmount: quoteAmount,
-      consumedInputAmount: quoteSpent,
-      residualInputAmount: remainingQuote,
+      consumedInputAmount: quoteSpent + feeAmount,
+      tradeAmount: quoteSpent,
+      feeAmount,
+      feeAsset: "quote",
+      residualInputAmount: Math.max(0, quoteAmount - quoteSpent - feeAmount),
       bestLevelTouchRatio: bestLevelCapacityQuote > 0 ? bestLevelQuoteSpent / bestLevelCapacityQuote : 1,
       residualAfterOrder: Math.max(0, bestLevelCapacityQuote - bestLevelQuoteSpent),
     });
@@ -71,15 +85,20 @@ function simulateBuyWithQuote(orderbook, quoteAmount, feeRate = 0) {
 
   const averagePrice = quoteSpent / grossBase;
   const expectedSlippageBps = ((averagePrice / units[0].askPrice) - 1) * 10000;
+  const feeAmount = quoteSpent * feeRate;
 
   return {
     available: true,
     action: "BUY_BASE_WITH_QUOTE",
     usedSide: "ask",
     inputAmount: quoteAmount,
-    consumedInputAmount: quoteSpent,
-    outputAmount: grossBase * (1 - feeRate),
+    consumedInputAmount: quoteSpent + feeAmount,
+    tradeAmount: quoteSpent,
+    feeAmount,
+    feeAsset: "quote",
+    outputAmount: grossBase,
     grossOutputAmount: grossBase,
+    netOutputAmount: grossBase,
     averagePrice,
     bestPrice: units[0].askPrice,
     expectedSlippageBps,
@@ -89,12 +108,12 @@ function simulateBuyWithQuote(orderbook, quoteAmount, feeRate = 0) {
   };
 }
 
-function simulateSellBaseForQuote(orderbook, baseAmount, feeRate = 0) {
+function simulateSellBaseForQuote(orderbook, baseAmount, feeRate = 0, options = {}) {
   if (!(baseAmount >= 0)) {
     throw new Error(`Invalid base amount: ${baseAmount}`);
   }
 
-  const units = normalizeUnits(orderbook);
+  const units = normalizeUnits(orderbook, options);
 
   if (units.length === 0) {
     return insufficientDepth({ residualInputAmount: baseAmount });
@@ -132,6 +151,7 @@ function simulateSellBaseForQuote(orderbook, baseAmount, feeRate = 0) {
 
   const averagePrice = grossQuote / baseSold;
   const expectedSlippageBps = (1 - (averagePrice / units[0].bidPrice)) * 10000;
+  const feeAmount = grossQuote * feeRate;
 
   return {
     available: true,
@@ -139,8 +159,12 @@ function simulateSellBaseForQuote(orderbook, baseAmount, feeRate = 0) {
     usedSide: "bid",
     inputAmount: baseAmount,
     consumedInputAmount: baseSold,
-    outputAmount: grossQuote * (1 - feeRate),
+    tradeAmount: grossQuote,
+    feeAmount,
+    feeAsset: "quote",
+    outputAmount: grossQuote - feeAmount,
     grossOutputAmount: grossQuote,
+    netOutputAmount: grossQuote - feeAmount,
     averagePrice,
     bestPrice: units[0].bidPrice,
     expectedSlippageBps,
@@ -158,6 +182,14 @@ function policyForMarket(feePolicyByMarket, market) {
   if (!feePolicyByMarket) return null;
   if (feePolicyByMarket instanceof Map) return feePolicyByMarket.get(market) || null;
   return feePolicyByMarket[market] || null;
+}
+
+function marketPolicyForMarket(marketPolicyByMarket, market) {
+  if (!marketPolicyByMarket) return normalizeMarketPolicyForMarket(market);
+  const policy = marketPolicyByMarket instanceof Map
+    ? marketPolicyByMarket.get(market)
+    : marketPolicyByMarket[market];
+  return normalizeMarketPolicyForMarket(market, policy || null);
 }
 
 function feeFromPolicy(policy, side, options = {}) {
@@ -192,6 +224,14 @@ function resolveLegFeeRate(step, side, fallbackFeeRate, options = {}) {
     return policyFee;
   }
 
+  if (options.useDefaultFeePolicy === true) {
+    const defaultFee = feeFromPolicy(defaultFeePolicyForMarket(step.market), side, options);
+
+    if (defaultFee !== null) {
+      return defaultFee;
+    }
+  }
+
   return Number(fallbackFeeRate || 0);
 }
 
@@ -199,6 +239,22 @@ function orderbookTimestamp(orderbook) {
   const timestamp = Number(orderbook && (orderbook.timestamp || orderbook.tms));
 
   return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function validationOrderForLeg(step, side, simulated) {
+  const price = simulated.averagePrice;
+  const volume = side === "bid"
+    ? simulated.grossOutputAmount
+    : simulated.consumedInputAmount;
+
+  return {
+    market: step.market,
+    side,
+    ord_type: "limit",
+    price,
+    volume,
+    observedBestPrice: simulated.bestPrice,
+  };
 }
 
 function simulateCycleWithDepth(cycle, orderbooks, startAmount, feeRate = 0, options = {}) {
@@ -244,11 +300,15 @@ function simulateCycleWithDepth(cycle, orderbooks, startAmount, feeRate = 0, opt
     if (step.fromAsset === quote && step.toAsset === base) {
       feeSide = "bid";
       legFeeRate = resolveLegFeeRate(step, feeSide, feeRate, options);
-      simulated = simulateBuyWithQuote(orderbook, amount, legFeeRate);
+      simulated = simulateBuyWithQuote(orderbook, amount, legFeeRate, {
+        maxDepthLevels: options.maxDepthLevels,
+      });
     } else if (step.fromAsset === base && step.toAsset === quote) {
       feeSide = "ask";
       legFeeRate = resolveLegFeeRate(step, feeSide, feeRate, options);
-      simulated = simulateSellBaseForQuote(orderbook, amount, legFeeRate);
+      simulated = simulateSellBaseForQuote(orderbook, amount, legFeeRate, {
+        maxDepthLevels: options.maxDepthLevels,
+      });
     } else {
       return {
         available: false,
@@ -272,6 +332,11 @@ function simulateCycleWithDepth(cycle, orderbooks, startAmount, feeRate = 0, opt
       usedSide: simulated.usedSide,
       feeSide,
       feeRate: legFeeRate,
+      feeAmount: simulated.feeAmount,
+      feeAsset: simulated.feeAsset === "quote" ? parseMarket(step.market).quote : simulated.feeAsset,
+      tradeAmount: simulated.tradeAmount,
+      grossOutputAmount: simulated.grossOutputAmount,
+      netOutputAmount: simulated.netOutputAmount,
       averagePrice: simulated.averagePrice,
       bestPrice: simulated.bestPrice,
       expectedSlippageBps: simulated.expectedSlippageBps,
@@ -281,6 +346,30 @@ function simulateCycleWithDepth(cycle, orderbooks, startAmount, feeRate = 0, opt
       orderbookTimestampMs: timestamp,
       orderbookAgeMs: timestamp === null ? null : Math.max(0, nowMs - timestamp),
     };
+
+    if (simulated.available && options.validateOrderTotals === true) {
+      const totalCheck = validateOrderTotal(
+        validationOrderForLeg(step, feeSide, simulated),
+        marketPolicyForMarket(options.marketPolicyByMarket, step.market),
+      );
+      leg.orderTotal = totalCheck.total;
+      leg.minOrderTotal = totalCheck.minTotal;
+      leg.maxOrderTotal = totalCheck.maxTotal;
+
+      if (!totalCheck.ok) {
+        legs.push(leg);
+        return {
+          available: false,
+          rejectionCode: totalCheck.rejectionReason,
+          rejectionReason: totalCheck.rejectionReason,
+          outputAmount: null,
+          profitRate: null,
+          limitingLeg: leg.legIndex,
+          limitingMarket: step.market,
+          legs,
+        };
+      }
+    }
 
     legs.push(leg);
 
@@ -308,7 +397,24 @@ function simulateCycleWithDepth(cycle, orderbooks, startAmount, feeRate = 0, opt
     outputAmount: amount,
     multiplier: startAmount > 0 ? amount / startAmount : null,
     profitRate: startAmount > 0 ? amount / startAmount - 1 : null,
+    feeSummary: summarizeFeeByAsset(legs),
     legs,
+  };
+}
+
+function summarizeFeeByAsset(legs = []) {
+  const totalByAsset = {};
+
+  for (const leg of legs) {
+    const asset = leg.feeAsset;
+    const amount = Number(leg.feeAmount);
+    if (!asset || !Number.isFinite(amount)) continue;
+    totalByAsset[asset] = (totalByAsset[asset] || 0) + amount;
+  }
+
+  return {
+    legs: legs.length,
+    totalByAsset,
   };
 }
 
@@ -318,4 +424,5 @@ module.exports = {
   simulateSellBaseForQuote,
   simulateCycleWithDepth,
   resolveLegFeeRate,
+  summarizeFeeByAsset,
 };

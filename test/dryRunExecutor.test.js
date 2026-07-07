@@ -49,6 +49,9 @@ test("dry-run executor simulates fills and PnL without real orders", async () =>
     feeRate: 0,
     nowMs: 1000,
     staleOrderbookMs: 5000,
+    marketPolicyByMarket: new Map([
+      ["BTC-ETH", { bid: { minTotal: 0, maxTotal: 1000 }, ask: { minTotal: 0, maxTotal: 1000 } }],
+    ]),
     validationOrderbooks: new Map([
       ["KRW-BTC", orderbook("KRW-BTC", { ask_price: 100, bid_price: 99, ask_size: 200, bid_size: 200 })],
       ["BTC-ETH", orderbook("BTC-ETH", { ask_price: 0.1, bid_price: 0.09, ask_size: 2000, bid_size: 2000 })],
@@ -58,6 +61,8 @@ test("dry-run executor simulates fills and PnL without real orders", async () =>
 
   assert.equal(result.mode, "DRY_RUN");
   assert.equal(result.ok, true);
+  assert.equal(result.startAmount, 10000);
+  assert.equal(result.legResults.length, 3);
   assert.equal(result.events.some((event) => event.type === "order.simulated_fill"), true);
   assert.equal(result.events.some((event) => event.type === "capital.reserved"), true);
   assert.equal(result.events.some((event) => event.type === "cycle.simulated_done"), true);
@@ -96,6 +101,9 @@ test("dry-run executor writes schema-complete cycle and simulated fill audit eve
       ["BTC-ETH", { bidFee: 0.002, askFee: 0.002 }],
       ["KRW-ETH", { bidFee: 0.003, askFee: 0.003 }],
     ]),
+    marketPolicyByMarket: new Map([
+      ["BTC-ETH", { bid: { minTotal: 0, maxTotal: 1000 }, ask: { minTotal: 0, maxTotal: 1000 } }],
+    ]),
     validationOrderbooks: new Map([
       ["KRW-BTC", orderbook("KRW-BTC", { ask_price: 100, bid_price: 99, ask_size: 200, bid_size: 200 })],
       ["BTC-ETH", orderbook("BTC-ETH", { ask_price: 0.1, bid_price: 0.09, ask_size: 2000, bid_size: 2000 })],
@@ -110,11 +118,16 @@ test("dry-run executor writes schema-complete cycle and simulated fill audit eve
   assert.equal(cycleDone.auditSchema.ok, true);
   assert.equal(cycleDone.engineState, "RUNNING");
   assert.equal(cycleDone.marketState, "available");
+  assert.equal(cycleDone.startAmount, 10000);
+  assert.equal(cycleDone.legResults.length, 3);
+  assert.equal(cycleDone.capitalBefore.availableBalance, 20000);
+  assert.equal(cycleDone.capitalAfter.availableBalance, 27892.2873533652);
   assert.equal(simulatedFill.auditSchema.ok, true);
   assert.equal(simulatedFill.startAsset, "KRW");
   assert.equal(simulatedFill.strategyId, "depthAwareBestIoc");
   assert.equal(simulatedFill.feeSide, "bid");
   assert.equal(simulatedFill.feeRate, 0.001);
+  assert.equal(simulatedFill.averagePrice, 100);
 });
 
 test("dry-run executor enforces simulated balance guard", async () => {

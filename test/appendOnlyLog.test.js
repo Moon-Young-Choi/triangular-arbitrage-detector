@@ -194,3 +194,25 @@ test("append-only log store reads recent rows from large ndjson files without fu
 
   assert.deepEqual(recent.map((row) => row.index), [4995, 4996, 4997, 4998, 4999]);
 });
+
+test("append-only log store skips malformed ndjson rows while reading", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-log-malformed-"));
+  const store = new AppendOnlyLogStore({ logDir: dir });
+  const malformedRows = [];
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(store.filePath("events"), [
+    JSON.stringify({ type: "cycle.done", index: 1 }),
+    "{\"type\":\"cycle.done\",\"index\":",
+    JSON.stringify({ type: "cycle.done", index: 2 }),
+    "",
+  ].join("\n"));
+
+  const rows = await store.readAll("events", {
+    limit: 10,
+    onMalformedLine: (entry) => malformedRows.push(entry),
+  });
+
+  assert.deepEqual(rows.map((row) => row.index), [1, 2]);
+  assert.equal(malformedRows.length, 1);
+  assert.match(malformedRows[0].message, /Unexpected end of JSON input|Expected/u);
+});

@@ -13,10 +13,11 @@ function residualFromFill(input = {}) {
   const remainingVolume = numberOrZero(input.remainingVolume);
   const avgPrice = numberOrZero(input.avgPrice);
   const unsubmittedInputAmount = Math.max(0, numberOrZero(submittedOrder.unsubmittedInputAmount));
+  const feeRate = Math.max(0, numberOrZero(submittedOrder.feeRate));
   const isPartial = remainingVolume > 0 ||
     (requestedVolume > 0 && executedVolume > 0 && executedVolume < requestedVolume);
   const orderResidualAmount = isPartial && submittedOrder.side === "bid"
-    ? remainingVolume * numberOrZero(submittedOrder.observedBestPrice || avgPrice)
+    ? remainingVolume * numberOrZero(submittedOrder.observedBestPrice || avgPrice) * (1 + feeRate)
     : remainingVolume;
   const residualAmount = Math.max(0, unsubmittedInputAmount + orderResidualAmount);
 

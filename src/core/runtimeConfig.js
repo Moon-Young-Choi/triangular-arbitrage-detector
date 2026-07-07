@@ -82,7 +82,7 @@ const DEFAULT_RUNTIME_CONFIG = {
     minOrderAmountByAsset: {
       KRW: 5000,
       BTC: 0.00005,
-      USDT: 5,
+      USDT: 0.5,
     },
     maxTouchRatioPerBestLevel: 0.3,
     minResidualRatioPerBestLevel: 0.1,
