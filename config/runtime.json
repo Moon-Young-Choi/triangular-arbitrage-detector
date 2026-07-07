@@ -7,7 +7,7 @@
   "executionMode": "LIMIT_IOC_AT_OBSERVED_BEST",
   "enabledExecutionModes": ["LIMIT_IOC_AT_OBSERVED_BEST"],
   "liveTradingEnabled": false,
-  "activeStrategyId": "topOfBookBaseline",
+  "activeStrategyId": "bestLevelResidualIoc",
   "executionPolicy": {
     "stopPolicy": "CANCEL_OPEN_ORDERS",
     "partialFillPolicy": "CONTINUE_IF_ABOVE_MIN",
@@ -57,7 +57,13 @@
     }
   },
   "candidateValidation": {
+    "sizingMode": "best-level-residual",
     "startAmountByAsset": {
+      "KRW": 10000,
+      "BTC": 0.0002,
+      "USDT": 10
+    },
+    "maxStartAmountByAsset": {
       "KRW": 10000,
       "BTC": 0.0002,
       "USDT": 10
@@ -67,8 +73,8 @@
       "BTC": 0.00005,
       "USDT": 5
     },
-    "maxTouchRatioPerBestLevel": 0.3,
-    "minResidualRatioPerBestLevel": 0.1,
+    "maxTouchRatioPerBestLevel": 0.99,
+    "minResidualRatioPerBestLevel": 0.01,
     "minResidualAbsoluteByAsset": {
       "KRW": 5000,
       "BTC": 0.00005,
