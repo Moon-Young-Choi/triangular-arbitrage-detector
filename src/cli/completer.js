@@ -199,10 +199,7 @@ const COMMAND_COMPLETIONS = {
           entry("sub-to-main", "Move asset from the current sub pocket to main"),
         ],
         2: START_ASSETS.map((asset) => entry(asset, "Asset currency")),
-        3: [
-          entry("10000", "Transfer amount"),
-          entry("30000", "Transfer amount"),
-        ],
+        3: [],
       },
     },
     options: [
@@ -216,7 +213,7 @@ const COMMAND_COMPLETIONS = {
     ],
     optionValues: {
       currency: START_ASSETS.map((asset) => entry(asset, "Asset currency")),
-      amount: [entry("10000", "Transfer amount"), entry("30000", "Transfer amount")],
+      amount: [],
     },
   },
   "/opportunity": {

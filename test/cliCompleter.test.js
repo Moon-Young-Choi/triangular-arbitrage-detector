@@ -18,6 +18,12 @@ test("CLI completer completes slash command prefixes", () => {
 test("CLI completer completes subcommands and option values", () => {
   assert.deepEqual(completeSlashCommand("/start d"), [["dry"], "d"]);
   assert.deepEqual(completeSlashCommand("/logs --kind d"), [["decisions"], "d"]);
+  assert.equal(
+    slashCommandSuggestionState("/pocket transfer sub-to-main BTC ").entries.some((entry) => (
+      entry.value === "10000" || entry.value === "30000"
+    )),
+    false,
+  );
 
   const [deskOptions, deskTarget] = completeSlashCommand("/desk --st");
   assert.equal(deskTarget, "--st");

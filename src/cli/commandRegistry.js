@@ -38,7 +38,7 @@ const COMMANDS = [
   ["/latency", "Show latency/performance budget"],
   ["/execution", "Show execution balances, contracts, orders, fills, and guards"],
   ["/balances", "Show dry-run and real balance snapshots"],
-  ["/pocket list|balance|transfer", "Inspect Upbit pockets or transfer assets between main/sub pockets"],
+  ["/pocket list|balance|transfer <main-to-sub|sub-to-main> <asset> <amount>", "Inspect Upbit pockets or transfer an exact asset amount between main/sub pockets"],
   ["/contracts [--follow] [--mode DRY_RUN|REAL]", "Show executed dry-run/real contract details"],
   ["/logs [--kind events|decisions|orders|fills|errors] [--follow]", "Read append-only logs"],
   ["/dryrun report [--format json|csv]", "Show dry-run review report"],

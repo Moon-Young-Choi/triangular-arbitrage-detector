@@ -493,7 +493,7 @@ test("CLI pocket commands preview and submit Upbit pocket transfers", async () =
   const subBalance = await runOnce(parseSlashCommand("/pocket balance gagarin"), context);
   const preview = await runOnce(parseSlashCommand("/pocket transfer main-to-sub KRW 30000 --to gagarin"), context);
   const mainTransfer = await runOnce(parseSlashCommand("/pocket transfer main-to-sub KRW 30000 --to gagarin --yes --identifier pocket-test-main"), context);
-  const subTransfer = await runOnce(parseSlashCommand("/pocket transfer sub-to-main KRW 5000 --yes --identifier pocket-test-sub"), context);
+  const subTransfer = await runOnce(parseSlashCommand("/pocket transfer sub-to-main BTC 0.00012345 --yes --identifier pocket-test-sub"), context);
 
   assert.match(list.output, /gagarin/);
   assert.match(currentBalance.output, /30000/);
@@ -503,8 +503,9 @@ test("CLI pocket commands preview and submit Upbit pocket transfers", async () =
   assert.match(mainTransfer.output, /submitted/);
   assert.match(mainTransfer.output, /transfer-main-uuid/);
   assert.match(subTransfer.output, /transfer-sub-uuid/);
+  assert.match(subTransfer.output, /0\.00012345/);
   assert.equal(calls.some((call) => call.method === "transferFromMainPocket" && call.live === true && call.transfer.to === "sub-pocket-uuid"), true);
-  assert.equal(calls.some((call) => call.method === "transferFromSubPocket" && call.live === true && call.transfer.to === undefined), true);
+  assert.equal(calls.some((call) => call.method === "transferFromSubPocket" && call.live === true && call.transfer.currency === "BTC" && call.transfer.amount === "0.00012345"), true);
 });
 
 test("CLI contracts renders executed dry-run contract details with optional colors", async () => {
