@@ -226,14 +226,18 @@ function collectMarketDataConsistency(cycle, validationOrderbooks, observationOr
       const observation = orderbookForMarket(observationOrderbooks, step.market);
 
       if (!observation) {
-        return {
-          ok: false,
-          rejectionCode: REJECTION_REASONS.OBSERVATION_SNAPSHOT_MISSING,
-          limitingMarket: step.market,
-          validationOrderbookSources,
-          validationOrderbookMetadata,
-          expectedValidationOrderbookUnit: expectedUnit,
-        };
+        if (config.requireObservationSnapshot !== false) {
+          return {
+            ok: false,
+            rejectionCode: REJECTION_REASONS.OBSERVATION_SNAPSHOT_MISSING,
+            limitingMarket: step.market,
+            validationOrderbookSources,
+            validationOrderbookMetadata,
+            expectedValidationOrderbookUnit: expectedUnit,
+          };
+        }
+
+        continue;
       }
 
       const observationTime = orderbookComparisonTimeMs(observation);

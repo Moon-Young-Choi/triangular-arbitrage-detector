@@ -1192,6 +1192,13 @@ class LiveTriangleState {
       (legTimestamps.length > 0 ? Math.max(...legTimestamps) : null);
     const riskStartPerfNs = perfNowNs();
     const marketDataGuards = this.runtimeConfig.executionPolicy.marketDataGuards || {};
+    const candidateValidation = this.runtimeConfig.candidateValidation || {};
+    const expectedValidationOrderbookUnit = Object.hasOwn(candidateValidation, "expectedValidationOrderbookUnit")
+      ? candidateValidation.expectedValidationOrderbookUnit
+      : this.runtimeConfig.validationOrderbookUnit;
+    const validationStaleOrderbookMs = candidateValidation.requireFreshValidationOrderbook === false
+      ? null
+      : this.staleOrderbookMs;
     const depthValidation = validateDepthAwareCandidate(cycle, validationOrderbooks, {
       feeRate: this.feeRate,
       useDefaultFeePolicy: true,
@@ -1200,14 +1207,14 @@ class LiveTriangleState {
       maxDepthLevels: 1,
       validateOrderTotals: true,
       nowMs: calculatedAtEpochMs,
-      staleOrderbookMs: this.staleOrderbookMs,
+      staleOrderbookMs: validationStaleOrderbookMs,
       observationOrderbooks: calculationOrderbooks,
       config: {
-        ...this.runtimeConfig.candidateValidation,
+        ...candidateValidation,
         sizingMode: this.activeStrategy.defaultConfig &&
           this.activeStrategy.defaultConfig.sizingMode ||
-          this.runtimeConfig.candidateValidation.sizingMode,
-        expectedValidationOrderbookUnit: this.runtimeConfig.validationOrderbookUnit,
+          candidateValidation.sizingMode,
+        expectedValidationOrderbookUnit,
         maxValidationLegTimestampSkewMs: marketDataGuards.maxLegTimestampSkewMs,
         maxOldestValidationReceivedAgeMs: marketDataGuards.maxOldestLegAgeMs,
       },
