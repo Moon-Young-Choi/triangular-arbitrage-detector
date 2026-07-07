@@ -813,14 +813,36 @@ class EngineRuntime {
       throw new Error(`Invalid runMode: ${runMode}`);
     }
 
+    const liveTradingEnabled = requestedRunMode.startsWith("REAL_") &&
+      process.env.Q_GAGARIN_LIVE_TRADING_ENABLED === "true";
+
     this.runtimeConfig = freezeRuntimeConfig({
       ...this.runtimeConfig,
       runMode: requestedRunMode,
+      liveTradingEnabled,
     }, {
       allowLiveTrading: process.env.Q_GAGARIN_ALLOW_LIVE_TRADING === "true",
     });
     this.state.setRuntimeConfig(this.runtimeConfig);
+    this.syncExecutionClients();
     return this.runtimeConfig.runMode;
+  }
+
+  syncExecutionClients() {
+    const liveTradingEnabled = this.runtimeConfig.liveTradingEnabled === true;
+
+    if (this.restClient) {
+      this.restClient.liveTradingEnabled = liveTradingEnabled;
+      this.restClient.mode = String(this.runtimeConfig.runMode || "").startsWith("REAL") ? "REAL" : this.runtimeConfig.runMode;
+    }
+
+    if (this.realExecutor) {
+      this.realExecutor.runtimeConfig = this.runtimeConfig;
+      this.realExecutor.liveTradingEnabled = liveTradingEnabled;
+      if (this.realExecutor.orderManager) {
+        this.realExecutor.orderManager.runtimeConfig = this.runtimeConfig;
+      }
+    }
   }
 
   async applyCommand(commandInput, metadata = {}) {

@@ -579,6 +579,60 @@ test("engine runtime wires default Upbit REST client to append-only audit log", 
   assert.equal(runtime.realExecutor.restClient, runtime.restClient);
 });
 
+test("engine runtime derives live trading from env only for real run modes", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-live-env-"));
+  const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
+  const previousAllowLiveTrading = process.env.Q_GAGARIN_ALLOW_LIVE_TRADING;
+  const previousLiveTradingEnabled = process.env.Q_GAGARIN_LIVE_TRADING_ENABLED;
+
+  await logStore.ensureFiles();
+  process.env.Q_GAGARIN_ALLOW_LIVE_TRADING = "true";
+  process.env.Q_GAGARIN_LIVE_TRADING_ENABLED = "true";
+
+  try {
+    const runtime = new EngineRuntime({
+      runtimeDir: dir,
+      logStore,
+      commandStatusStore: new CommandStatusStore({ runtimeDir: dir }),
+      state: fakeState(),
+      runtimeConfig: DEFAULT_RUNTIME_CONFIG,
+      restClient: {
+        liveTradingEnabled: false,
+        mode: "OBSERVE",
+      },
+      observationClient: fakeWsClient(),
+      validationClient: fakeWsClient(),
+      startedAtEpochMs: Date.now() - 1000,
+    });
+
+    runtime.setRunMode("REAL_GUARDED");
+
+    assert.equal(runtime.runtimeConfig.liveTradingEnabled, true);
+    assert.equal(runtime.restClient.liveTradingEnabled, true);
+    assert.equal(runtime.restClient.mode, "REAL");
+    assert.equal(runtime.realExecutor.liveTradingEnabled, true);
+
+    runtime.setRunMode("DRY_RUN");
+
+    assert.equal(runtime.runtimeConfig.liveTradingEnabled, false);
+    assert.equal(runtime.restClient.liveTradingEnabled, false);
+    assert.equal(runtime.restClient.mode, "DRY_RUN");
+    assert.equal(runtime.realExecutor.liveTradingEnabled, false);
+  } finally {
+    if (previousAllowLiveTrading === undefined) {
+      delete process.env.Q_GAGARIN_ALLOW_LIVE_TRADING;
+    } else {
+      process.env.Q_GAGARIN_ALLOW_LIVE_TRADING = previousAllowLiveTrading;
+    }
+
+    if (previousLiveTradingEnabled === undefined) {
+      delete process.env.Q_GAGARIN_LIVE_TRADING_ENABLED;
+    } else {
+      process.env.Q_GAGARIN_LIVE_TRADING_ENABLED = previousLiveTradingEnabled;
+    }
+  }
+});
+
 test("engine runtime gates REAL_AUTO start with readiness checks", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-real-auto-gate-"));
   const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
@@ -616,7 +670,7 @@ test("engine runtime gates REAL_AUTO start with readiness checks", async () => {
   assert.equal(events.some((event) => event.type === "readiness.blocked" && event.readiness.passed === false), true);
 });
 
-test("engine runtime applies configured dry-run readiness guard thresholds", async () => {
+test("engine runtime ignores dry-run evidence for real readiness", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-readiness-guards-"));
   const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
   const previousAccessKey = process.env.UPBIT_ACCESS_KEY;
@@ -716,6 +770,17 @@ test("engine runtime applies configured dry-run readiness guard thresholds", asy
             errors: [],
           };
         },
+        async getOrderChance(market) {
+          return {
+            market,
+            marketDetails: {
+              bid: { minTotal: market === "KRW-BTC" ? "5000" : "0.00005" },
+              ask: { minTotal: market === "KRW-BTC" ? "5000" : "0.00005" },
+            },
+            bidFee: 0.0005,
+            askFee: 0.0005,
+          };
+        },
       },
       observationClient: fakeWsClient(),
       validationClient: fakeWsClient(),
@@ -727,22 +792,11 @@ test("engine runtime applies configured dry-run readiness guard thresholds", asy
     const events = await logStore.readAll("events");
     const checked = events.find((event) => event.type === "readiness.checked");
 
-    assert.equal(readiness.passed, false);
-    assert.equal(readiness.items.some((item) => item.id === "dry-run-sample-count" && item.passed === true), true);
+    assert.equal(readiness.passed, true);
+    assert.equal(readiness.items.some((item) => item.id.startsWith("dry-run")), false);
     assert.equal(checked.score.failed, readiness.score.failed);
     assert.equal(checked.failedCount, readiness.score.failed);
-    assert.equal(
-      readiness.items.some((item) => (
-        item.id === "dry-run-start-asset-sample-count-KRW" &&
-        item.passed === false &&
-        item.required === 2
-      )),
-      true,
-    );
-    assert.equal(
-      readiness.items.some((item) => item.id === "dry-run-start-asset-sample-count-BTC" && item.passed === false),
-      true,
-    );
+    assert.equal(checked.failedCount, 0);
   } finally {
     if (previousAccessKey === undefined) {
       delete process.env.UPBIT_ACCESS_KEY;

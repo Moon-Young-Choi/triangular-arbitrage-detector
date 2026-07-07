@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 
 const readline = require("node:readline");
+const { loadEnvFile } = require("../src/core/envFile");
 const { startEngineRuntime } = require("../src/engine/engineRuntime");
 const {
   dashboardColorEnabled,
   renderEngineDashboard,
 } = require("../src/cli/renderers/engineDashboard");
+
+loadEnvFile();
 
 function dashboardEnabled(output = process.stdout) {
   return output &&

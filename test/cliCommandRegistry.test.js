@@ -188,7 +188,7 @@ test("CLI start prints readiness failures when real-guarded command is rejected"
           runMode: "REAL_GUARDED",
           source: "cli",
           message: "REAL_GUARDED readiness checklist failed",
-          failedItems: ["dry-run-sample-count", "private-ws-connected"],
+          failedItems: ["api-key-present", "private-ws-connected"],
         };
       },
     },
@@ -201,7 +201,7 @@ test("CLI start prints readiness failures when real-guarded command is rejected"
 
   assert.match(result.output, /Status\s+rejected/);
   assert.match(result.output, /REAL_GUARDED readiness checklist failed/);
-  assert.match(result.output, /dry-run-sample-count/);
+  assert.match(result.output, /api-key-present/);
   assert.match(result.output, /private-ws-connected/);
 });
 

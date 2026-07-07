@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const readline = require("node:readline");
+const { loadEnvFile } = require("../src/core/envFile");
 const { createTelemetryReadModel } = require("../src/ops/telemetryReadModel");
 const { renderContracts } = require("../src/cli/renderers/contracts");
 const {
@@ -10,6 +11,8 @@ const {
   monitorColorEnabled,
   renderContractsMonitor,
 } = require("../src/cli/renderers/contractsMonitor");
+
+loadEnvFile();
 
 function readOption(name, fallback = "") {
   const argv = process.argv.slice(2);

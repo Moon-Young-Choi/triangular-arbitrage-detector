@@ -15,6 +15,17 @@ nvm use
 npm install
 ```
 
+For authenticated Upbit private REST/WebSocket access, copy `.env.example` values into the ignored local `.env` file and fill in the keys:
+
+```bash
+UPBIT_ACCESS_KEY=
+UPBIT_SECRET_KEY=
+Q_GAGARIN_ALLOW_LIVE_TRADING=false
+Q_GAGARIN_LIVE_TRADING_ENABLED=false
+```
+
+Set both `Q_GAGARIN_ALLOW_LIVE_TRADING=true` and `Q_GAGARIN_LIVE_TRADING_ENABLED=true` before starting `REAL_GUARDED`. Dry/observe starts force live trading back off.
+
 ## Scripts
 
 ```bash
@@ -126,7 +137,7 @@ Append-only NDJSON logs are written under `out/logs/`:
 
 Every appended record is normalized with `eventId`, `traceId`, `ts`, `mode`, `exchange`, `startAsset`, `cycleId`, `strategyId`, `engineState`, and a structured `payload` when those fields apply. Records also include `auditSchemaVersion` and `auditSchema.missingRequiredFields`, so dry-run, real-run, command, order, fill, and market-data events can be checked for replay/audit completeness without dropping legacy top-level fields.
 
-Authenticated Upbit REST and private MyOrder WebSocket foundations are present. Real order creation is refused unless `liveTradingEnabled=true`, `Q_GAGARIN_ALLOW_LIVE_TRADING=true`, and the `REAL_GUARDED` readiness checklist passes. The checklist now requires both global dry-run quality and per-`enabledStartAssets` dry-run evidence before real trading can start, with thresholds configured in `executionPolicy.readinessGuards`. `DRY_RUN` uses the same execution-plan shape and writes simulated decision/order/fill events without calling Upbit order creation.
+Authenticated Upbit REST and private MyOrder WebSocket foundations are present. Real order creation is refused unless `liveTradingEnabled=true`, `Q_GAGARIN_ALLOW_LIVE_TRADING=true`, and the `REAL_GUARDED` readiness checklist passes. The checklist verifies real-run dependencies such as API credentials, permissions, private WS, order chance cache, account balance cache, and public feed readiness. Dry-run reports are operator reference material only and do not block real-run startup. `DRY_RUN` uses the same execution-plan shape and writes simulated decision/order/fill events without calling Upbit order creation.
 
 The private MyOrder WebSocket authenticates with a JWT bearer header, subscribes to `myOrder`, normalizes fill and fee fields, sends periodic ping heartbeats, and reconnects after unexpected closes while retaining close code/reason status metadata for readiness and CLI diagnostics.
 
@@ -142,7 +153,7 @@ Real-run guardrails track realized PnL by start asset and trading day, expose da
 
 Latency is split into market-data, decision, execution, and display/client domains. Market-data and decision latency feed strategy/risk decisions, execution latency is checked against `executionPolicy.executionGuards.maxOrderAckMs` and `maxReconciliationMs`, and display/client latency is informational only. If an intermediate leg exceeds the execution latency budget, the cycle stops with a residual asset instead of submitting the next leg. When `recoverOnRepriceLoss` is enabled on a plan, each intermediate leg is repriced before submission; if the current best bid/ask makes the remaining route worse than the original expected output, the executor skips the next triangle leg and submits a recovery IOC order back to the start asset.
 
-`/contracts` renders executed dry-run and real-run cycles as contract summaries with contract size, asset trend, triangle, route, canonical/reverse direction, per-leg fill prices, fees, slippage, touch ratio, and execution timing. Real leg timing includes order ack, private WS/REST reconciliation, query, and total leg milliseconds; recovered-to-start cycles are included as contract rows. Profit/loss numbers are colored in TTY output; use `--color always`, `--color never`, or `--no-color` to override. `/start dry --follow` and `/start real-guarded --follow` queue Start once, then follow only newly executed contract summaries. `/logs` can filter append-only logs by mode, type, start asset, strategy, cycle, and period. `/dryrun report` exposes a dry-run report summary and JSON/CSV export, including complete rate, depth/latency rejection rates, expected-vs-simulated PnL gap, review period, and start-asset/strategy/route/market-state/latency/best-touch breakdowns. `/readiness` shows the real-run readiness score and start-asset evidence. `/execution` separates latest real-run orders/fills from dry-run logs and shows guard/cache/readiness status, locked balances, residual assets, contract details, and real-run PnL by start asset.
+`/contracts` renders executed dry-run and real-run cycles as contract summaries with contract size, asset trend, triangle, route, canonical/reverse direction, per-leg fill prices, fees, slippage, touch ratio, and execution timing. Real leg timing includes order ack, private WS/REST reconciliation, query, and total leg milliseconds; recovered-to-start cycles are included as contract rows. Profit/loss numbers are colored in TTY output; use `--color always`, `--color never`, or `--no-color` to override. `/start dry --follow` and `/start real-guarded --follow` queue Start once, then follow only newly executed contract summaries. `/logs` can filter append-only logs by mode, type, start asset, strategy, cycle, and period. `/dryrun report` exposes a dry-run report summary and JSON/CSV export, including complete rate, depth/latency rejection rates, expected-vs-simulated PnL gap, review period, and start-asset/strategy/route/market-state/latency/best-touch breakdowns. `/readiness` shows the real-run readiness score for real dependencies only. `/execution` separates latest real-run orders/fills from dry-run logs and shows guard/cache/readiness status, locked balances, residual assets, contract details, and real-run PnL by start asset.
 
 Replay support can regenerate dry-run execution plans and the same dry-run review report summary from a saved orderbook tape without touching the exchange:
 
