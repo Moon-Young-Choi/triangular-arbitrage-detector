@@ -318,16 +318,6 @@ class EngineRuntime {
       });
       this.privateWsClient.on("status", (status) => {
         this.privateWsStatus = status;
-        const disconnected = status.status !== "open" && status.stopped !== true;
-        if (disconnected) {
-          const guard = this.riskGuard.evaluatePrivateWsDisconnect(this.activeRealExecutionCount);
-          if (!guard.ok && guard.emergencyStop) {
-            this.activateEmergencyStop(guard.rejectionReason, {
-              source: "private-ws",
-              activeRealExecutionCount: this.activeRealExecutionCount,
-            }).catch(() => {});
-          }
-        }
       });
       this.privateWsClient.on("error", (error) => {
         this.state.logEvent("error", { source: "private-ws", error });
@@ -1419,48 +1409,10 @@ class EngineRuntime {
       return null;
     }
 
-    let orderCapacityReservation = null;
-    try {
-      orderCapacityReservation = this.rateLimitScheduler.reserveOrderCapacity({
-        count: 3,
-        traceId: plan.planId,
-        cycleId: plan.cycleId || (plan.cycle && plan.cycle.cycleId),
-        ttlMs: Number.parseInt(process.env.UPBIT_ORDER_RESERVATION_TTL_MS || "3000", 10),
-      });
-      await this.logStore.append("orders", {
-        type: "order.capacity_reserved",
-        mode: "REAL",
-        planId: plan.planId,
-        cycleId: plan.cycleId || (plan.cycle && plan.cycle.cycleId),
-        startAsset: plan.startAsset || (plan.cycle && plan.cycle.startAsset),
-        strategyId: plan.strategyId,
-        reservation: orderCapacityReservation.snapshot(),
-      });
-    } catch (error) {
-      await this.logStore.append("orders", {
-        type: "order.rejected",
-        mode: "REAL",
-        planId: plan.planId,
-        cycleId: plan.cycleId || (plan.cycle && plan.cycle.cycleId),
-        startAsset: plan.startAsset || (plan.cycle && plan.cycle.startAsset),
-        strategyId: plan.strategyId,
-        rejectionReason: "ORDER_CAPACITY_UNAVAILABLE",
-        requiredOrderSlots: error.required || 3,
-        availableOrderSlots: error.available || 0,
-      });
-      return {
-        ok: false,
-        reason: "ORDER_CAPACITY_UNAVAILABLE",
-        requiredOrderSlots: error.required || 3,
-        availableOrderSlots: error.available || 0,
-      };
-    }
-
     this.activeRealExecutionCount += 1;
     try {
       const result = await this.realExecutor.execute(plan, {
         ...this.currentGuardContext(),
-        orderCapacityReservation,
         getGuardContext: () => this.currentGuardContext(),
         getValidationOrderbooks: () => this.state.getValidationOrderbooks(),
         getMarketPolicy: (market) => this.marketPolicyByMarket.get(market) || null,
@@ -1495,63 +1447,29 @@ class EngineRuntime {
           legResults: result.legResults || [],
           tradingDay: realizedRecord.tradingDay,
         });
-        const lossGuard = this.realRunLimits.evaluateDailyLoss(startAsset);
-        if (!lossGuard.ok && lossGuard.emergencyStop) {
-          await this.activateEmergencyStop(lossGuard.rejectionReason, {
-            source: "real-run-limits",
-            mode: "REAL",
-            startAsset,
-            currentLoss: lossGuard.currentLoss,
-            maxLoss: lossGuard.maxLoss,
-            planId: plan.planId,
-            cycleId: plan.cycleId || (plan.cycle && plan.cycle.cycleId),
-          });
-        }
       }
 
       if (result) {
         await this.recordExecutionResiduals(result, plan);
       }
 
-      if (result && result.emergencyStop) {
-        await this.activateEmergencyStop(result.reason || "REAL_EXECUTION_EMERGENCY_STOP", {
-          source: "real-executor",
-          mode: "REAL",
-          planId: plan.planId,
-          cycleId: plan.cycleId,
-        });
-      }
-
       return result;
     } catch (error) {
-      const failed = this.riskGuard.recordFailure(error.message);
       await this.logStore.append("errors", {
         type: "real_execution_error",
         mode: "REAL",
         planId: plan.planId,
         cycleId: plan.cycleId,
         message: error.message,
-        emergencyStop: failed.emergencyStop,
+        emergencyStop: false,
       });
-
-      if (failed.emergencyStop) {
-        await this.activateEmergencyStop(error.message, {
-          source: "real-execution-error",
-          mode: "REAL",
-          planId: plan.planId,
-          cycleId: plan.cycleId,
-        });
-      }
 
       return {
         ok: false,
         reason: error.message,
-        emergencyStop: failed.emergencyStop,
+        emergencyStop: false,
       };
     } finally {
-      if (orderCapacityReservation && typeof orderCapacityReservation.release === "function") {
-        orderCapacityReservation.release();
-      }
       this.activeRealExecutionCount = Math.max(0, this.activeRealExecutionCount - 1);
     }
   }

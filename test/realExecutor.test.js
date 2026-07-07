@@ -199,7 +199,7 @@ test("real executor writes schema-complete audit events through append-only log"
   assert.equal(fill.strategyId, "depthAwareBestIoc");
 });
 
-test("real executor blocks new orders when private WS is disconnected", async () => {
+test("real executor follows dry-run guards when private WS is disconnected", async () => {
   const submitted = [];
   const events = [];
   const executor = new RealExecutor({
@@ -220,7 +220,20 @@ test("real executor blocks new orders when private WS is disconnected", async ()
       },
       async createOrder(order) {
         submitted.push(order);
-        return { uuid: "unexpected", ...order };
+        return { uuid: `uuid-private-ws-${submitted.length}`, ...order };
+      },
+      async getOrder(params) {
+        const order = submitted.find((item) => item.identifier === params.identifier) || submitted.at(-1);
+        return {
+          ...order,
+          uuid: params.uuid,
+          executed_volume: order.volume || "1",
+          remaining_volume: "0",
+          avg_price: order.price || "90",
+          paid_fee: "0",
+          trade_fee: "0",
+          state: "done",
+        };
       },
     },
   });
@@ -237,14 +250,12 @@ test("real executor blocks new orders when private WS is disconnected", async ()
     validationDepthFresh: true,
   });
 
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "PRIVATE_WS_DISCONNECTED");
-  assert.equal(result.residualAsset, undefined);
-  assert.equal(submitted.length, 0);
-  assert.equal(events.some((event) => event.type === "cycle.aborted" && event.reason === "PRIVATE_WS_DISCONNECTED"), true);
+  assert.equal(result.ok, true);
+  assert.equal(submitted.length, 2);
+  assert.equal(events.some((event) => event.type === "cycle.aborted" && event.reason === "PRIVATE_WS_DISCONNECTED"), false);
 });
 
-test("real executor reevaluates decision age before submitting the first order", async () => {
+test("real executor does not apply real-only decision age before submitting the first order", async () => {
   const submitted = [];
   const events = [];
   const executor = new RealExecutor({
@@ -267,7 +278,20 @@ test("real executor reevaluates decision age before submitting the first order",
       },
       async createOrder(order) {
         submitted.push(order);
-        return { uuid: "unexpected", ...order };
+        return { uuid: `uuid-stale-first-${submitted.length}`, ...order };
+      },
+      async getOrder(params) {
+        const order = submitted.find((item) => item.identifier === params.identifier) || submitted.at(-1);
+        return {
+          ...order,
+          uuid: params.uuid,
+          executed_volume: order.volume || "1",
+          remaining_volume: "0",
+          avg_price: order.price || "90",
+          paid_fee: "0",
+          trade_fee: "0",
+          state: "done",
+        };
       },
     },
   });
@@ -286,14 +310,12 @@ test("real executor reevaluates decision age before submitting the first order",
     validationDepthFresh: true,
   });
 
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "DECISION_STALE");
-  assert.equal(result.residualAsset, undefined);
-  assert.equal(submitted.length, 0);
-  assert.equal(events.some((event) => event.type === "cycle.aborted" && event.reason === "DECISION_STALE"), true);
+  assert.equal(result.ok, true);
+  assert.equal(submitted.length, 2);
+  assert.equal(events.some((event) => event.type === "cycle.aborted" && event.reason === "DECISION_STALE"), false);
 });
 
-test("real executor reevaluates decision age before each subsequent leg", async () => {
+test("real executor does not apply real-only decision age before subsequent legs", async () => {
   const submitted = [];
   const events = [];
   const baseNowMs = Date.now();
@@ -365,13 +387,10 @@ test("real executor reevaluates decision age before each subsequent leg", async 
     },
   });
 
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "DECISION_STALE");
-  assert.equal(result.residualAsset, "BTC");
-  assert.equal(result.actualAmount, 1);
-  assert.equal(submitted.length, 1);
-  assert.equal(events.some((event) => event.type === "order.rejected" && event.legIndex === 2 && event.rejectionReason === "DECISION_STALE"), true);
-  assert.equal(events.some((event) => event.type === "execution.state_changed" && event.executionState === "CYCLE_RESIDUAL"), true);
+  assert.equal(result.ok, true);
+  assert.equal(submitted.length, 2);
+  assert.equal(events.some((event) => event.type === "order.rejected" && event.legIndex === 2 && event.rejectionReason === "DECISION_STALE"), false);
+  assert.equal(events.some((event) => event.type === "execution.state_changed" && event.executionState === "CYCLE_RESIDUAL"), false);
 });
 
 test("real executor records order submit failures as cycle aborts", async () => {
@@ -990,7 +1009,7 @@ test("real executor returns leg fill summaries and fee totals", async () => {
   assert.equal(result.feeSummary.totalByAsset.KRW, 1.01);
 });
 
-test("real executor stops before next leg when execution latency exceeds budget", async () => {
+test("real executor records latency but does not stop before next leg when latency exceeds budget", async () => {
   const submissions = [];
   const events = [];
   const executor = new RealExecutor({
@@ -1055,11 +1074,11 @@ test("real executor stops before next leg when execution latency exceeds budget"
     validationDepthFresh: true,
   });
 
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "ORDER_ACK_LATENCY");
-  assert.equal(submissions.length, 1);
-  assert.equal(events.some((event) => event.type === "risk.rejected" && event.reason === "ORDER_ACK_LATENCY"), true);
-  assert.equal(events.some((event) => event.type === "cycle.aborted" && event.reason === "ORDER_ACK_LATENCY"), true);
+  assert.equal(result.ok, true);
+  assert.equal(submissions.length, 2);
+  assert.equal(events.some((event) => event.type === "risk.rejected" && event.reason === "ORDER_ACK_LATENCY"), false);
+  assert.equal(events.some((event) => event.type === "cycle.aborted" && event.reason === "ORDER_ACK_LATENCY"), false);
+  assert.equal(result.legResults[0].latencySummary.execution.orderAckMs.valueMs, 3);
 });
 
 test("real executor can abort partial fills by policy", async () => {

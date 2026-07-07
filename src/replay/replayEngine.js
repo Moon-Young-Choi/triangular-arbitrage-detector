@@ -244,7 +244,6 @@ async function replayDryRunReport(options = {}) {
       ...(runtimeConfig.candidateValidation || {}),
       ...(options.validationConfig || {}),
     },
-    latencyLimitMs: options.latencyLimitMs,
   });
   const dryRunExecutions = [];
 

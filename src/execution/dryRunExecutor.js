@@ -28,7 +28,6 @@ class DryRunExecutor {
     this.logWriteQueue = Promise.resolve();
     this.events = [];
     this.validationConfig = mergeValidationConfig(options.validationConfig);
-    this.latencyLimitMs = options.latencyLimitMs || 2000;
     this.activeEngineState = null;
   }
 
@@ -115,10 +114,6 @@ class DryRunExecutor {
         reason: allocation.rejectionReason,
         capital: allocation.bucket,
       };
-    }
-
-    if (Number(plan.latencyMs || 0) > this.latencyLimitMs) {
-      return { ok: false, reason: "LATENCY_GUARD" };
     }
 
     return {

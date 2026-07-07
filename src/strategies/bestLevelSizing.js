@@ -1,7 +1,6 @@
 const { calculateCycleMultiplier } = require("../lib/multiplier");
 const { parseMarket } = require("../lib/marketGraph");
 const { resolveLegFeeRate } = require("../lib/depthSimulator");
-const { policyForMarket } = require("../exchanges/upbit/marketPolicy");
 
 function numberOrNull(value) {
   const parsed = Number(value);
@@ -36,17 +35,7 @@ function firstUnit(orderbook) {
   return unit;
 }
 
-function getMarketPolicy(source, market) {
-  const value = source instanceof Map ? source.get(market) : source && source[market];
-  return policyForMarket(market, value);
-}
-
-function sidePolicy(policy, side) {
-  const scoped = policy && policy[side];
-  return scoped && typeof scoped === "object" ? scoped : {};
-}
-
-function bestLevelResidualInputCap(step, orderbook, feeRate, marketPolicy, config = {}) {
+function bestLevelResidualInputCap(step, orderbook, feeRate, config = {}) {
   const unit = firstUnit(orderbook);
   if (!unit) {
     return {
@@ -59,12 +48,10 @@ function bestLevelResidualInputCap(step, orderbook, feeRate, marketPolicy, confi
   const residualRatio = Math.max(0, Math.min(1, Number(config.minResidualRatioPerBestLevel || 0)));
 
   if (step.fromAsset === quote && step.toAsset === base) {
-    const policy = sidePolicy(marketPolicy, "bid");
-    const minResidualTotal = Math.max(0, Number(policy.minTotal || 0));
+    const minResidualTotal = 0;
     const bestLevelTotal = unit.askPrice * unit.askSize;
-    const maxTradeTotalByMinResidual = Math.max(0, bestLevelTotal - minResidualTotal);
     const maxTradeTotalByRatio = bestLevelTotal * (1 - residualRatio);
-    const tradeInputCap = Math.min(maxTradeTotalByMinResidual, maxTradeTotalByRatio);
+    const tradeInputCap = maxTradeTotalByRatio;
     const inputCap = tradeInputCap * (1 + Number(feeRate || 0));
 
     return {
@@ -84,12 +71,10 @@ function bestLevelResidualInputCap(step, orderbook, feeRate, marketPolicy, confi
   }
 
   if (step.fromAsset === base && step.toAsset === quote) {
-    const policy = sidePolicy(marketPolicy, "ask");
-    const minResidualTotal = Math.max(0, Number(policy.minTotal || 0));
+    const minResidualTotal = 0;
     const bestLevelTotal = unit.bidPrice * unit.bidSize;
-    const maxTradeTotalByMinResidual = Math.max(0, bestLevelTotal - minResidualTotal);
     const maxTradeTotalByRatio = bestLevelTotal * (1 - residualRatio);
-    const tradeQuoteCap = Math.min(maxTradeTotalByMinResidual, maxTradeTotalByRatio);
+    const tradeQuoteCap = maxTradeTotalByRatio;
     const inputCap = tradeQuoteCap / unit.bidPrice;
 
     return {
@@ -161,7 +146,6 @@ function computeBestLevelResidualStartAmount(cycle, orderbooks, options = {}) {
       step,
       orderbookForMarket(orderbooks, step.market),
       legFeeRate,
-      getMarketPolicy(options.marketPolicyByMarket, step.market),
       config,
     );
     const maxStartAmount = cap.ok && inputPerStart > 0 ? cap.inputCap / inputPerStart : null;

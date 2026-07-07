@@ -90,9 +90,9 @@ const DEFAULT_RUNTIME_CONFIG = {
     maxTouchRatioPerBestLevel: 0.3,
     minResidualRatioPerBestLevel: 0.1,
     minResidualAbsoluteByAsset: {
-      KRW: 5000,
-      BTC: 0.00005,
-      USDT: 5,
+      KRW: 0,
+      BTC: 0,
+      USDT: 0,
     },
     minNetProfitRate: 0,
     maxObservationValidationGapMs: 500,

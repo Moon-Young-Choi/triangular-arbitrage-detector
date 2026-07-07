@@ -20,6 +20,7 @@ class OrderManager {
     this.orderRateLimitPerSecond = Number.isFinite(Number(options.orderRateLimitPerSecond))
       ? Number(options.orderRateLimitPerSecond)
       : 8;
+    this.enforceOrderRateLimit = options.enforceOrderRateLimit !== false;
     this.rateLimiter = options.rateLimiter || new TokenBucketRateLimiter({
       limitPerSecond: this.orderRateLimitPerSecond,
     });
@@ -91,7 +92,7 @@ class OrderManager {
     }
 
     const nowMs = metadata.nowMs || Date.now();
-    if (this.rateLimiter && !this.rateLimiter.allow(nowMs)) {
+    if (this.enforceOrderRateLimit && this.rateLimiter && !this.rateLimiter.allow(nowMs)) {
       const error = new Error("ORDER_RATE_LIMIT");
       error.code = "ORDER_RATE_LIMIT";
       error.limitPerSecond = this.orderRateLimitPerSecond;

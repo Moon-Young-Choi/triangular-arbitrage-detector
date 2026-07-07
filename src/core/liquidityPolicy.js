@@ -13,9 +13,9 @@ const DEFAULT_VALIDATION_CONFIG = Object.freeze({
   maxTouchRatioPerBestLevel: 0.3,
   minResidualRatioPerBestLevel: 0.1,
   minResidualAbsoluteByAsset: Object.freeze({
-    KRW: 5000,
-    BTC: 0.00005,
-    USDT: 5,
+    KRW: 0,
+    BTC: 0,
+    USDT: 0,
   }),
   minNetProfitRate: 0,
   maxObservationValidationGapMs: 500,
@@ -59,18 +59,14 @@ function maxExecutableStartAmount(startAmount, legs, maxTouchRatio) {
 function limitingLegFor(legs, policy) {
   const maxTouchRatio = Number(policy.maxTouchRatioPerBestLevel);
   const minResidualRatio = Number(policy.minResidualRatioPerBestLevel);
-  const minResidualAbsoluteByAsset = policy.minResidualAbsoluteByAsset || {};
   let limiting = null;
 
   for (const leg of legs) {
     const touchRatio = Number(leg.bestLevelTouchRatio);
-    const residualAfterOrder = Number(leg.residualAfterOrder);
-    const minResidualAbsolute = Number(minResidualAbsoluteByAsset[leg.residualAsset] || 0);
 
     if (
       touchRatio > maxTouchRatio ||
-      touchRatio > 1 - minResidualRatio ||
-      residualAfterOrder < minResidualAbsolute
+      touchRatio > 1 - minResidualRatio
     ) {
       if (!limiting || touchRatio > limiting.bestLevelTouchRatio) {
         limiting = leg;

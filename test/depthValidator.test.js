@@ -162,6 +162,23 @@ test("liquidity policy merges validation config and calculates limiting best-lev
   assert.equal(REJECTION_REASONS.BEST_LEVEL_OVERCONSUMPTION, "BEST_LEVEL_OVERCONSUMPTION");
 });
 
+test("liquidity policy ignores absolute residual thresholds", () => {
+  const config = mergeValidationConfig({
+    maxTouchRatioPerBestLevel: 1,
+    minResidualRatioPerBestLevel: 0,
+    minResidualAbsoluteByAsset: { KRW: 1000 },
+  });
+  const legs = [{
+    legIndex: 1,
+    market: "KRW-BTC",
+    bestLevelTouchRatio: 0.01,
+    residualAfterOrder: 1,
+    residualAsset: "KRW",
+  }];
+
+  assert.equal(limitingLegFor(legs, config), null);
+});
+
 test("candidate validation rejects insufficient validation depth", () => {
   const validation = validateDepthAwareCandidate(cycle, new Map([
     ["KRW-BTC", orderbook("KRW-BTC", [{ ask_price: 1000000, bid_price: 999000, ask_size: 0.000001, bid_size: 0.000001 }])],
@@ -213,7 +230,7 @@ test("candidate validation rejects best-level overconsumption and reports limit 
   assert.equal(validation.maxExecutableStartAmount, 6000);
 });
 
-test("candidate validation can size from best-level residual minimum order value", () => {
+test("candidate validation can size from best-level residual ratio without absolute residual value", () => {
   const validation = validateDepthAwareCandidate(cycle, new Map([
     ["KRW-BTC", orderbook("KRW-BTC", [{ ask_price: 100, bid_price: 99, ask_size: 100, bid_size: 100 }])],
     ["BTC-ETH", orderbook("BTC-ETH", [{ ask_price: 0.1, bid_price: 0.09, ask_size: 100000, bid_size: 100000 }])],
@@ -240,9 +257,9 @@ test("candidate validation can size from best-level residual minimum order value
 
   assert.equal(validation.accepted, true);
   assert.equal(validation.sizingMode, "best-level-residual");
-  assert.equal(validation.executableStartAmount, 5000);
+  assert.equal(validation.executableStartAmount, 10000);
   assert.equal(validation.sizingLegs[0].bestLevelTotal, 10000);
-  assert.equal(validation.sizingLegs[0].residualAfterCapTotal, 5000);
+  assert.equal(validation.sizingLegs[0].residualAfterCapTotal, 0);
 });
 
 test("depth simulation and candidate validation use market and side specific fee policies", () => {

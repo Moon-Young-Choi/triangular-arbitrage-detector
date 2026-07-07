@@ -1205,7 +1205,7 @@ test("engine runtime applies emergency stop policy by cancelling tracked open or
   assert.equal(triggered.stopOrderPolicy.cancelFailedCount, 0);
 });
 
-test("engine runtime triggers emergency stop when private WS disconnects during active execution", async () => {
+test("engine runtime records private WS disconnect without emergency stop", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-private-ws-stop-"));
   const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
   const privateWsClient = {
@@ -1243,15 +1243,13 @@ test("engine runtime triggers emergency stop when private WS disconnects during 
   const events = await logStore.readAll("events");
   const triggered = events.find((event) => event.type === "emergency_stop.triggered");
 
-  assert.equal(runtime.machine.state, "ERROR");
-  assert.equal(runtime.emergencyStop.active, true);
-  assert.equal(runtime.emergencyStop.reason, "PRIVATE_WS_DISCONNECT_DURING_ACTIVE_EXECUTION");
-  assert.equal(triggered.reason, "PRIVATE_WS_DISCONNECT_DURING_ACTIVE_EXECUTION");
-  assert.equal(triggered.details.source, "private-ws");
-  assert.equal(triggered.details.activeRealExecutionCount, 1);
+  assert.equal(runtime.machine.state, "RUNNING");
+  assert.equal(runtime.emergencyStop.active, false);
+  assert.equal(runtime.privateWsStatus.status, "closed");
+  assert.equal(triggered, undefined);
 });
 
-test("engine runtime triggers emergency stop when realized daily loss reaches limit", async () => {
+test("engine runtime records daily loss without emergency stop", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "q-gagarin-engine-loss-stop-"));
   const logStore = new AppendOnlyLogStore({ logDir: path.join(dir, "logs") });
   const runtimeConfig = {
@@ -1327,15 +1325,11 @@ test("engine runtime triggers emergency stop when realized daily loss reaches li
   assert.equal(realized.engineState, "RUNNING");
   assert.equal(realized.strategyId, runtimeConfig.activeStrategyId);
   assert.equal(realized.auditSchema.ok, true);
-  assert.equal(runtime.machine.state, "ERROR");
-  assert.equal(snapshot.emergencyStop.active, true);
-  assert.equal(snapshot.emergencyStop.reason, "MAX_DAILY_LOSS");
+  assert.equal(runtime.machine.state, "RUNNING");
+  assert.equal(snapshot.emergencyStop.active, false);
+  assert.equal(snapshot.emergencyStop.reason, null);
   assert.equal(snapshot.realRunLimits.dailyLossByAsset.KRW, 6);
   assert.equal(snapshot.realRunLimits.recentResults[0].feeSummary.totalTradeFee, 2.5);
-
-  await runtime.applyCommand("Stop", { source: "operator" });
-  assert.equal(runtime.machine.state, "STOPPED");
-  assert.equal(runtime.emergencyStop.active, false);
 });
 
 test("engine runtime records residual assets from failed real execution", async () => {

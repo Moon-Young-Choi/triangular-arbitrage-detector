@@ -238,6 +238,7 @@ class RealExecutor {
       orderRateLimitPerSecond: this.runtimeConfig.executionPolicy &&
         this.runtimeConfig.executionPolicy.executionGuards &&
         this.runtimeConfig.executionPolicy.executionGuards.orderRateLimitPerSecond,
+      enforceOrderRateLimit: false,
     });
     this.partialFillPolicy = resolvePartialFillPolicy({
       partialFillPolicy: options.partialFillPolicy,
@@ -283,6 +284,52 @@ class RealExecutor {
     }
 
     return context;
+  }
+
+  executionFailure(reason) {
+    return { emergencyStop: false, reason };
+  }
+
+  guard(plan, context = {}) {
+    const startAsset = plan.startAsset || (plan.cycle && plan.cycle.startAsset);
+    const validationConfig = this.runtimeConfig.candidateValidation || {};
+    const startAmount = Number(plan.startAmount || validationConfig.startAmountByAsset &&
+      validationConfig.startAmountByAsset[startAsset] || 0);
+    const minOrderAmount = Number(validationConfig.minOrderAmountByAsset &&
+      validationConfig.minOrderAmountByAsset[startAsset] || 0);
+
+    if (plan.engineState && plan.engineState !== "RUNNING") {
+      return { ok: false, rejectionReason: "EXECUTION_PAUSED", emergencyStop: false };
+    }
+
+    if (startAmount < minOrderAmount) {
+      return { ok: false, rejectionReason: "MIN_ORDER_AMOUNT_NOT_MET", emergencyStop: false };
+    }
+
+    const availableBalances = context.availableBalances || {};
+    const lockedBalances = context.lockedBalances || {};
+    const availableBalance = Number(availableBalances[startAsset]);
+    const lockedBalance = Number(lockedBalances[startAsset] || 0);
+
+    if (startAsset && Number.isFinite(availableBalance) && startAmount > availableBalance) {
+      return {
+        ok: false,
+        rejectionReason: "BALANCE_INSUFFICIENT",
+        emergencyStop: false,
+        startAsset,
+        startAmount,
+        availableBalance,
+        lockedBalance: Number.isFinite(lockedBalance) ? lockedBalance : null,
+      };
+    }
+
+    return {
+      ok: true,
+      rejectionReason: null,
+      emergencyStop: false,
+      startAsset,
+      startAmount,
+    };
   }
 
   planWithCurrentAges(plan, nowMs = Date.now()) {
@@ -1015,10 +1062,7 @@ class RealExecutor {
     this.activeEngineState = plan.engineState || context.engineState || this.runtimeConfig.engineState || null;
 
     const initialGuardContext = this.currentGuardContext(context);
-    const guard = this.riskGuard.evaluatePlan(this.planWithCurrentAges(plan, initialGuardContext.nowMs), {
-      ...initialGuardContext,
-      skipOrderGuards: true,
-    });
+    const guard = this.guard(plan, initialGuardContext);
     if (!guard.ok) {
       this.emit("orders", {
         type: "order.rejected",
@@ -1040,7 +1084,8 @@ class RealExecutor {
       };
     }
 
-    let amount = Number(plan.startAmount);
+    const startAmount = Number(guard.startAmount);
+    let amount = startAmount;
     const cycleStartPerfNs = perfNowNs();
     const legResults = [];
     this.riskGuard.recordCycleStart(context.nowMs || Date.now());
@@ -1065,56 +1110,6 @@ class RealExecutor {
           market: step.market,
           inputAmount: legInputAmount,
         });
-      }
-
-      const guardContext = this.currentGuardContext(context);
-      const orderGuard = this.riskGuard.evaluatePlan(this.planWithCurrentAges(plan, guardContext.nowMs), {
-        ...guardContext,
-        skipCycleRateLimit: true,
-      });
-      if (!orderGuard.ok) {
-        const failure = this.riskGuard.recordFailure(orderGuard.rejectionReason);
-        const residual = step.index > 0 ? {
-          residualAsset: step.fromAsset,
-          actualAmount: amount,
-        } : {};
-        this.emitState(plan, `LEG_${legIndex}_FAILED`, {
-          legIndex,
-          market: step.market,
-          reason: orderGuard.rejectionReason,
-        });
-        this.emitState(plan, step.index > 0 ? "CYCLE_RESIDUAL" : "CYCLE_ABORTED", {
-          legIndex,
-          reason: orderGuard.rejectionReason,
-          ...residual,
-          emergencyStop: failure.emergencyStop,
-        });
-        this.emit("orders", {
-          type: "order.rejected",
-          planId: plan.planId,
-          cycleId: plan.cycle.cycleId,
-          startAsset: plan.startAsset || plan.cycle.startAsset,
-          strategyId: plan.strategyId,
-          legIndex,
-          rejectionReason: orderGuard.rejectionReason,
-          emergencyStop: failure.emergencyStop,
-        });
-        this.emitCycleAborted(plan, {
-          legIndex,
-          market: step.market,
-          reason: orderGuard.rejectionReason,
-          rejectionReason: orderGuard.rejectionReason,
-          ...residual,
-          emergencyStop: failure.emergencyStop,
-        });
-        return {
-          ok: false,
-          reason: orderGuard.rejectionReason,
-          ...residual,
-          legResults,
-          feeSummary: summarizeFees(legResults),
-          emergencyStop: failure.emergencyStop,
-        };
       }
 
       const validationOrderbooks = await this.validationOrderbooksForLeg(plan, context);
@@ -1169,7 +1164,7 @@ class RealExecutor {
       try {
         marketPolicy = await this.marketPolicyForLeg(step, context);
       } catch (error) {
-        const failure = this.riskGuard.recordFailure("MARKET_POLICY_UNAVAILABLE");
+        const failure = this.executionFailure("MARKET_POLICY_UNAVAILABLE");
         this.emitState(plan, `LEG_${legIndex}_FAILED`, {
           legIndex,
           market: step.market,
@@ -1223,7 +1218,7 @@ class RealExecutor {
       const orderTotalCheck = validateOrderTotal(order, marketPolicy);
 
       if (!orderTotalCheck.ok) {
-        const failure = this.riskGuard.recordFailure(orderTotalCheck.rejectionReason);
+        const failure = this.executionFailure(orderTotalCheck.rejectionReason);
         this.emitState(plan, `LEG_${legIndex}_FAILED`, {
           legIndex,
           market: step.market,
@@ -1327,12 +1322,11 @@ class RealExecutor {
           engineState: this.activeEngineState,
           legIndex,
           market: step.market,
-          orderCapacityReservation: context.orderCapacityReservation || null,
         });
       } catch (error) {
         const reason = this.orderSubmitFailureReason(error);
         const errorDetails = this.orderSubmitFailureDetails(error);
-        const failure = this.riskGuard.recordFailure(reason);
+        const failure = this.executionFailure(reason);
         this.emitState(plan, `LEG_${legIndex}_FAILED`, {
           legIndex,
           market: step.market,
@@ -1439,7 +1433,7 @@ class RealExecutor {
       });
 
       if (!fill.ok) {
-        const failure = this.riskGuard.recordFailure(fill.reason);
+        const failure = this.executionFailure(fill.reason);
         this.emitState(plan, `LEG_${legIndex}_FAILED`, {
           legIndex,
           market: step.market,
@@ -1585,58 +1579,6 @@ class RealExecutor {
         latencySummary,
       });
 
-      const latencyGuard = this.riskGuard.evaluateExecutionLatency(executionLatency);
-      if (!latencyGuard.ok && step.index < plan.cycle.steps.length - 1) {
-        const failure = this.riskGuard.recordFailure(latencyGuard.rejectionReason);
-        this.emitState(plan, "CYCLE_RESIDUAL", {
-          legIndex,
-          reason: latencyGuard.rejectionReason,
-          residualAsset: step.toAsset,
-          actualAmount: amount,
-          observedMs: latencyGuard.observedMs,
-          limitMs: latencyGuard.limitMs,
-          emergencyStop: failure.emergencyStop,
-        });
-        this.emit("orders", {
-          type: "risk.rejected",
-          planId: plan.planId,
-          cycleId: plan.cycle.cycleId,
-          startAsset: plan.startAsset || plan.cycle.startAsset,
-          strategyId: plan.strategyId,
-          legIndex,
-          reason: latencyGuard.rejectionReason,
-          metric: latencyGuard.metric,
-          observedMs: latencyGuard.observedMs,
-          limitMs: latencyGuard.limitMs,
-          residualAsset: step.toAsset,
-          actualAmount: amount,
-          executionLatency,
-          emergencyStop: failure.emergencyStop,
-        });
-        this.emitCycleAborted(plan, {
-          legIndex,
-          market: step.market,
-          reason: latencyGuard.rejectionReason,
-          residualAsset: step.toAsset,
-          actualAmount: amount,
-          observedMs: latencyGuard.observedMs,
-          limitMs: latencyGuard.limitMs,
-          executionLatency,
-          emergencyStop: failure.emergencyStop,
-        });
-        return {
-          ok: false,
-          reason: latencyGuard.rejectionReason,
-          residualAsset: step.toAsset,
-          actualAmount: amount,
-          observedMs: latencyGuard.observedMs,
-          limitMs: latencyGuard.limitMs,
-          legResults,
-          feeSummary: summarizeFees(legResults),
-          emergencyStop: failure.emergencyStop,
-        };
-      }
-
       const isLastLeg = step.index >= plan.cycle.steps.length - 1;
       const minOrderAmount = Number(this.runtimeConfig.candidateValidation &&
         this.runtimeConfig.candidateValidation.minOrderAmountByAsset &&
@@ -1651,7 +1593,7 @@ class RealExecutor {
       });
 
       if (!partialFillDecision.ok) {
-        const failure = this.riskGuard.recordFailure(partialFillDecision.rejectionReason);
+        const failure = this.executionFailure(partialFillDecision.rejectionReason);
         this.emitState(plan, "CYCLE_RESIDUAL", {
           legIndex,
           reason: partialFillDecision.rejectionReason,
@@ -1692,7 +1634,7 @@ class RealExecutor {
         ...(leg.executionLatency || {}),
       })),
     };
-    const pnl = amount - Number(plan.startAmount);
+    const pnl = amount - startAmount;
     this.emitState(plan, "CYCLE_DONE", {
       outputAmount: amount,
       pnl,
@@ -1700,7 +1642,7 @@ class RealExecutor {
       cycleExecutionLatency,
     });
     this.emitCycleDone(plan, {
-      startAmount: Number(plan.startAmount),
+      startAmount,
       outputAmount: amount,
       pnl,
       feeSummary,

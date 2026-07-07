@@ -122,7 +122,7 @@ test("execution replay reproduces zero fill abort", async () => {
   assert.equal(result.replayEvents.filter((event) => event.type === "replay.order_submitted").length, 1);
 });
 
-test("execution replay reproduces REST ack latency guard", async () => {
+test("execution replay records REST ack latency without aborting", async () => {
   const config = runtimeConfig({
     executionPolicy: {
       executionGuards: {
@@ -138,10 +138,10 @@ test("execution replay reproduces REST ack latency guard", async () => {
     },
   });
 
-  assert.equal(result.result.ok, false);
-  assert.equal(result.result.reason, "ORDER_ACK_LATENCY");
-  assert.equal(result.replayEvents.filter((event) => event.type === "replay.order_submitted").length, 1);
-  assert.equal(result.logEvents.some((event) => event.type === "risk.rejected"), true);
+  assert.equal(result.result.ok, true);
+  assert.equal(result.replayEvents.filter((event) => event.type === "replay.order_submitted").length, 3);
+  assert.equal(result.logEvents.some((event) => event.type === "risk.rejected"), false);
+  assert.equal(result.result.legResults[0].latencySummary.execution.orderAckMs.valueMs, 5);
 });
 
 test("execution replay reproduces delayed private WS with REST fallback", async () => {
@@ -161,13 +161,12 @@ test("execution replay reproduces delayed private WS with REST fallback", async 
   assert.equal(result.logEvents.some((event) => event.kind === "fills" && event.source === "rest-query"), true);
 });
 
-test("execution replay reproduces private WS disconnected guard", async () => {
+test("execution replay follows dry-run guards when private WS is disconnected", async () => {
   const result = await replayRealExecution(acceptedPlan(), {
     runtimeConfig: runtimeConfig(),
     privateWsConnected: false,
   });
 
-  assert.equal(result.result.ok, false);
-  assert.equal(result.result.reason, "PRIVATE_WS_DISCONNECTED");
-  assert.equal(result.replayEvents.length, 0);
+  assert.equal(result.result.ok, true);
+  assert.equal(result.replayEvents.filter((event) => event.type === "replay.order_submitted").length, 3);
 });
